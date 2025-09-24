@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>GeoLocate — фронтенд</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:2rem;line-height:1.4}
+    h1{margin-bottom:0.5rem}
+    .grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+    .card{border:1px solid #ddd; border-radius:12px; padding:1rem}
+    label{display:block;margin:.5rem 0 .2rem}
+    input,select,button{padding:.5rem;border:1px solid #ccc;border-radius:8px}
+    button{cursor:pointer}
+    button.primary{background:#0d6efd;color:#fff;border:0}
+    pre{background:#f7f7f7;padding:1rem;border-radius:8px;overflow:auto}
+    img.thumb{max-width:120px;border-radius:8px;border:1px solid #ddd}
+    .row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+    .muted{color:#666;font-size:.9rem}
+    #preview {
+  display: flex;
+  gap: .5rem;
+  margin-top: .75rem;
+  overflow-x: auto;
+  padding-bottom: .25rem;
+}
+#preview .thumb {
+  flex: 0 0 auto;
+  width: 160px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+}
+#preview {
+  display: flex;
+  gap: .5rem;
+  margin-top: .75rem;
+  overflow-x: auto;
+  padding-bottom: .25rem;
+}
+#preview .thumb {
+  flex: 0 0 auto;
+  width: 160px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+}
+  </style>
+</head>
+<body>
+ <<div id="user-banner" style="
+    text-align:center;
+    font-weight:bold;
+    padding:0.5rem;
+    background:#f0f0f0;
+    display:none;
+  ">
+  <span id="user-banner-text"></span>
+  <button id="logout-btn" style="margin-left:1rem; padding:0.3rem 0.6rem; font-weight:normal;">
+    Выйти
+  </button>
+  <div>
+    <a href="#" id="admin-link" style="display:none; font-weight:normal; font-size:.9rem;">Управление пользователями</a>
+  </div>
+</div>
+
+
+  <h1>АП-ПЕТ-ИТ GeoLocate</h1>
+  <p class="muted">Сервисы доступны на localhost по портам из .env</p>
+
+
+ <div class="card" id="admin-card" style="display:none;">
+  <h3>Админ: создать пользователя</h3>
+  <form id="admin-create-form">
+    <label>Имя</label>
+    <input id="new_name" required />
+
+    <label>Логин</label>
+    <input id="new_login" required />
+
+    <label>Пароль</label>
+    <input id="new_pass" type="password" required />
+
+    <label>Email</label>
+    <input id="new_email" type="email" value="user@local" required />
+
+    <label>Роль</label>
+    <select id="new_role">
+      <option value="viewer">viewer (просмотр)</option>
+      <option value="admin">admin</option>
+    </select>
+
+    <button class="primary" type="submit">Создать</button>
+  </form>
+  <pre id="admin_out">—</pre>
+</div>
+
+
+  <div class="card" id="admin-card" style="display:none;">
+  <h3>Админ: создать пользователя</h3>
+
+  <form id="admin-create-form">
+    <label>Имя (логин)</label>
+    <input id="new_name" required />
+
+    <label>Пароль</label>
+    <input id="new_pass" type="password" required />
+
+    <label>Email</label>
+    <input id="new_email" type="email" value="user@local" required />
+
+    <label>Роль</label>
+    <select id="new_role">
+      <option value="viewer">viewer (просмотр)</option>
+      <option value="uploader">uploader (загрузка/изменения)</option>
+      <option value="runner">runner (запуск расчёта)</option>
+      <option value="exporter">exporter (выгрузка)</option>
+      <option value="admin">admin (всё)</option>
+    </select>
+
+    <div class="row" style="margin-top:.5rem">
+      <button class="primary" type="submit">Создать</button>
+      <button type="button" id="btn-refresh-users">Обновить список</button>
+    </div>
+  </form>
+
+  <h4 style="margin-top:1rem;">Пользователи</h4>
+  <div id="users_table" class="muted">—</div>
+
+  <pre id="admin_out">—</pre>
+</div>
+
+  <pre id="admin_out">—</pre>
+</div>
+
+
+  <div class="grid">
+    <div class="card">
+      <h3>Вход</h3>
+      <label>Логин</label>
+      <input id="login_name" />
+      <label>Пароль</label>
+      <input id="login_pass" type="password" />
+      <button class="primary" onclick="login()">Войти</button>
+      <pre id="login_out">—</pre>
+    </div>
+
+    <div class="card">
+  <h3>Загрузка фото (несколько файлов)</h3>
+  <form id="photoFormMulti">
+    <label>Файлы (до 50)</label>
+    <input type="file" name="files" id="files" accept="image/*" multiple required />
+
+    <label>type1</label>
+    <select name="type1" id="type1_m">
+      <option>мусор</option>
+      <option>стройка</option>
+    </select>
+
+    <label>type2</label>
+    <select name="type2" id="type2_m">
+      <option>ИНС</option>
+      <option>КИНС</option>
+      <option>Другое</option>
+    </select>
+
+    <label>Здание (опц.)</label>
+    <input name="building" id="building_m" placeholder="краткое описание" />
+
+    <label>Адрес (опц.)</label>
+    <input name="address" id="address_m" placeholder="полный адрес" />
+
+    <div class="row" style="margin-top:.5rem">
+      <button class="primary" type="submit">Загрузить и рассчитать выбранные</button>
+      <button type="button" onclick="clearPreview()">Очистить предпросмотр</button>
+      <a href="#" id="last_photo_link" target="_blank">последнее фото</a>
+    </div>
+  </form>
+
+  <!-- предпросмотр -->
+  <div id="preview" class="scrollbar"></div>
+
+  <pre id="photo_multi_out">—</pre>
+</div>
+
+    <div class="card">
+      <h3>Загрузка координат</h3>
+      <label>Широта (lat)</label>
+      <input id="lat" placeholder="55.75" />
+      <label>Долгота (lon)</label>
+      <input id="lon" placeholder="37.61" />
+      <label>type1</label>
+      <select id="c_type1">
+        <option>мусор</option>
+        <option>стройка</option>
+      </select>
+      <label>type2</label>
+      <select id="c_type2">
+        <option>ИНС</option>
+        <option>КИНС</option>
+        <option>Другое</option>
+      </select>
+      <label>Здание (опц.)</label>
+      <input id="c_building" />
+      <label>Адрес (опц.)</label>
+      <input id="c_address" />
+      <div class="row" style="margin-top:.5rem">
+        <button class="primary" onclick="uploadCoords()">Сохранить</button>
+        <button onclick="searchByAddr()">Поиск по адресу</button>
+      </div>
+      <pre id="coords_out">—</pre>
+    </div>
+
+    <div class="card">
+      <h3>Экспорт в XLSX</h3>
+      <label>IDs (через запятую, пусто = всё)</label>
+      <input id="ids" placeholder="1,2,3" />
+      <button class="primary" onclick="exportXlsx()">Сформировать XLSX</button>
+      <pre class="muted">Колонки: Фотография, Здание, Адрес, Координаты</pre>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

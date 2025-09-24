@@ -1,0 +1,32 @@
+# IDE
+.idea/
+*.iml
+
+# Если хочешь делиться конфигами запуска/стилем, можно разрешить выборочно:
+#!.idea/runConfigurations/
+#!.idea/codeStyles/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.pyre/
+.coverage*
+htmlcov/
+
+# Виртуальные окружения и локальные данные
+.venv/
+venv/
+env/
+.env
+.env.*
+.DS_Store
+Thumbs.db
