@@ -1,3 +1,6 @@
-flask
-psycopg2-binary==2.9.9
+flask==3.0.3
+psycopg[binary]==3.2.1
+
 flask-cors
+
+

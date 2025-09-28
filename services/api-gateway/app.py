@@ -1,120 +1,130 @@
 import os
+from urllib.parse import urljoin
 import requests
-from flask import Flask, request, Response
-from flask_cors import CORS
-
-app = Flask(__name__)
-# Разрешим фронту с 8081 ходить к нам на 8080
-CORS(app, resources={r"/*": {"origins": ["http://localhost:8081", "http://127.0.0.1:8081"]}})
+from flask import Flask, request, redirect, send_from_directory, Response
 
 AUTH_URL   = os.getenv("AUTH_URL",   "http://auth-service:5000")
 PHOTO_URL  = os.getenv("PHOTO_URL",  "http://photo-service:5000")
 COORDS_URL = os.getenv("COORDS_URL", "http://coords-service:5000")
-CALC_URL   = os.getenv("CALC_URL",   "http://calc-service:5000")
 EXPORT_URL = os.getenv("EXPORT_URL", "http://export-service:5000")
 
-TIMEOUT = (10, 300)  # (connect, read)
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 
-def _pipe(resp):
-    excluded = {"content-encoding", "transfer-encoding", "connection"}
-    headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in excluded]
-    return Response(resp.content, resp.status_code, headers)
+DROP_HEADERS = {
+    "Content-Length","Transfer-Encoding","Connection","Keep-Alive",
+    "Proxy-Authenticate","Proxy-Authorization","TE","Trailer","Upgrade",
+    "Server","Date"
+}
+def relay(r: requests.Response) -> Response:
+    headers = [(k, v) for k, v in r.headers.items() if k not in DROP_HEADERS]
+    return Response(r.content, status=r.status_code, headers=headers)
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    return {"ok": True, "service": "api-gateway"}, 200
 
-# ---------------- PHOTO ----------------
-@app.get("/photo/healthz")
-def photo_health():
-    r = requests.get(f"{PHOTO_URL}/healthz", timeout=10)
-    return _pipe(r)
+@app.get("/")
+def root():
+    idx = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(idx):
+        return send_from_directory(STATIC_DIR, "index.html")
+    return {"ok": True, "service": "api-gateway"}, 200
 
-@app.post("/photo/upload_photo")
-def gw_upload_photo():
-    files = None
-    if "file" in request.files:
-        f = request.files["file"]
-        files = {"file": (f.filename, f.stream, f.mimetype)}
-    data = request.form.to_dict(flat=True)
-    r = requests.post(f"{PHOTO_URL}/upload_photo", files=files, data=data, timeout=TIMEOUT)
-    return _pipe(r)
+@app.get("/favicon.ico")
+def favicon():
+    p = os.path.join(STATIC_DIR, "favicon.ico")
+    if os.path.exists(p):
+        return send_from_directory(STATIC_DIR, "favicon.ico")
+    return ("", 204)
 
-@app.post("/photo/upload_photos")
-def gw_upload_photos():
-    files = [("files", (f.filename, f.stream, f.mimetype)) for f in request.files.getlist("files")]
-    data = request.form.to_dict(flat=True)
-    r = requests.post(f"{PHOTO_URL}/upload_photos", files=files, data=data, timeout=TIMEOUT)
-    return _pipe(r)
+# ---------- auth ----------
+@app.post("/api/register")
+def api_register():
+    r = requests.post(urljoin(AUTH_URL, "/register"), json=request.get_json(silent=True) or {})
+    return relay(r)
 
-@app.get("/photo/list")
-def gw_list_photos():
-    r = requests.get(f"{PHOTO_URL}/list", params=request.args, timeout=TIMEOUT)
-    return _pipe(r)
+@app.post("/api/login")
+def api_login():
+    r = requests.post(urljoin(AUTH_URL, "/login"), json=request.get_json(silent=True) or {})
+    return relay(r)
 
-@app.get("/photo/uploads/<path:name>")
-def gw_get_upload(name):
-    # проксируем бинарник (картинку) стримом
-    upstream = requests.get(f"{PHOTO_URL}/uploads/{name}", stream=True, timeout=TIMEOUT)
-    excluded = {"content-encoding", "transfer-encoding", "connection"}
-    headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
-    return Response(upstream.iter_content(8192), status=upstream.status_code, headers=headers)
+# ---------- photos / objects ----------
+@app.get("/api/photos")
+def api_photos():
+    r = requests.get(urljoin(PHOTO_URL, "/photos"), params=request.args)
+    return relay(r)
 
-# ---------------- COORDS ----------------
-@app.post("/coords/upload_coords")
-def gw_upload_coords():
-    r = requests.post(f"{COORDS_URL}/upload_coords", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
+@app.get("/api/photos/<uuid_str>")
+def api_photo_file(uuid_str: str):
+    # тянем файл с photo-service изнутри (докер-сеть видит photo-service)
+    upstream = requests.get(urljoin(PHOTO_URL, f"/photos/{uuid_str}"), stream=True)
+    # собираем заголовки, но не отдаём опасные/лишние
+    headers = []
+    for k, v in upstream.headers.items():
+        if k.lower() in {"content-length","transfer-encoding","connection","keep-alive",
+                         "proxy-authenticate","proxy-authorization","te","trailer","upgrade",
+                         "server","date"}:
+            continue
+        headers.append((k, v))
+    return Response(upstream.content, status=upstream.status_code, headers=headers)
 
-@app.get("/coords/search_by_addr")
-def gw_search_by_addr():
-    r = requests.get(f"{COORDS_URL}/search_by_addr", params=request.args, timeout=TIMEOUT)
-    return _pipe(r)
+@app.get("/api/objects")
+def api_objects():
+    r = requests.get(urljoin(PHOTO_URL, "/objects"), params=request.args)
+    return relay(r)
 
-# ---------------- AUTH ----------------
-@app.post("/auth/register")
-def gw_register():
-    r = requests.post(f"{AUTH_URL}/register", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
+@app.post("/api/upload")
+def api_upload():
+    if "image" not in request.files:
+        return {"error": "no file field 'image'"}, 400
+    files = {
+        "image": (
+            request.files["image"].filename,
+            request.files["image"].stream,
+            request.files["image"].mimetype
+        )
+    }
+    data = {}
+    for key in ("type", "subtype", "shot_lat", "shot_lon"):
+        v = request.form.get(key)
+        if v not in (None, ""):
+            data[key] = v
+    meta = request.files.get("meta")
+    if meta and meta.filename:
+        files["meta"] = (meta.filename, meta.stream, meta.mimetype or "application/json")
+    r = requests.post(urljoin(PHOTO_URL, "/upload"), data=data, files=files)
+    return relay(r)
 
-@app.post("/auth/login")
-def gw_login():
-    r = requests.post(f"{AUTH_URL}/login", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
+# ---------- поиск по адресу (геокод -> поиск ближайших фото) ----------
+@app.get("/api/search_address")
+def api_search_addr():
+    q = request.args.get("q", "")
+    g = requests.post(urljoin(COORDS_URL, "/geocode"), json={"query": q})
+    if g.status_code != 200:
+        return relay(g)
+    latlon = g.json() if g.text else {}
+    params = {
+        "lat": latlon.get("lat"),
+        "lon": latlon.get("lon"),
+        "radius_m": request.args.get("radius_m", 50),
+        "limit": request.args.get("limit", 5),
+    }
+    r = requests.get(urljoin(PHOTO_URL, "/search"), params=params)
+    return relay(r)
 
-@app.post("/auth/save_query")
-def gw_save_query():
-    r = requests.post(f"{AUTH_URL}/save_query", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
+# ---------- «расчёт координат» (имитация) ----------
+@app.post("/api/calc_for_photo")
+def api_calc_for_photo():
+    r = requests.post(urljoin(PHOTO_URL, "/calc_for_photo"), json=request.get_json(silent=True) or {})
+    return relay(r)
 
-@app.get("/auth/history/<int:user_id>")
-def gw_history(user_id):
-    r = requests.get(f"{AUTH_URL}/history/{user_id}", timeout=TIMEOUT)
-    return _pipe(r)
-
-# ---------------- CALC ----------------
-@app.post("/calc/calc")
-def gw_calc():
-    r = requests.post(f"{CALC_URL}/calc", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
-
-# ---------------- EXPORT ----------------
-@app.post("/export/export")
-def gw_export():
-    r = requests.post(f"{EXPORT_URL}/export", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
-
-
-@app.post("/auth/admin/create_user")
-def gw_admin_create_user():
-    r = requests.post(f"{AUTH_URL}/admin/create_user", json=request.get_json(silent=True), timeout=TIMEOUT)
-    return _pipe(r)
-
-@app.get("/auth/admin/users")
-def gw_admin_users():
-    r = requests.get(f"{AUTH_URL}/admin/users", params=request.args, timeout=TIMEOUT)
-    return _pipe(r)
-
+# ---------- экспорт ----------
+@app.post("/api/export_xlsx")
+def api_export_xlsx():
+    r = requests.post(urljoin(EXPORT_URL, "/export_xlsx"))
+    return relay(r)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)

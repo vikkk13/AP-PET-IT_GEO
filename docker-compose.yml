@@ -12,7 +12,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro   # только чтение
       - pgdata:/var/lib/postgresql/data
 
   auth-service:
@@ -26,6 +26,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      PORT: "5000"                         # <-- важно: внутри слушаем 5000
     ports:
       - "${AUTH_PORT}:5000"
 
@@ -41,8 +42,12 @@ services:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       UPLOAD_DIR: /uploads
+      INSTALL_DIR: /app/install
+      MODEL_DIR: /app/model
+      PORT: "5000"                         # <-- уже было ок
     volumes:
       - ./uploads:/uploads
+      - ./install:/app/install:ro
     ports:
       - "${PHOTO_PORT}:5000"
 
@@ -57,6 +62,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      PORT: "5000"                         # <-- важно
     ports:
       - "${COORDS_PORT}:5000"
 
@@ -64,6 +70,8 @@ services:
     build: ./services/calc-service
     container_name: calc_service
     restart: always
+    environment:
+      PORT: "5000"                         # <-- важно
     ports:
       - "${CALC_PORT}:5000"
 
@@ -78,7 +86,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-      PUBLIC_UPLOAD_BASE: "http://localhost:${PHOTO_PORT}/uploads"
+      PORT: "5000"                         # <-- важно
+      # лучше ссылаться на endpoint раздачи фото по UUID:
+      PUBLIC_UPLOAD_BASE: "http://localhost:${PHOTO_PORT}/photos"
     ports:
       - "${EXPORT_PORT}:5000"
 
@@ -93,22 +103,25 @@ services:
       - calc-service
       - export-service
     environment:
-      AUTH_URL: "http://auth-service:5000"
-      PHOTO_URL: "http://photo-service:5000"
+      AUTH_URL:   "http://auth-service:5000"
+      PHOTO_URL:  "http://photo-service:5000"
       COORDS_URL: "http://coords-service:5000"
-      CALC_URL: "http://calc-service:5000"
+      CALC_URL:   "http://calc-service:5000"
       EXPORT_URL: "http://export-service:5000"
+      PORT: "5000"                         # шлюз тоже слушает 5000 внутри
     ports:
       - "${GATEWAY_PORT}:5000"
 
   frontend:
     image: nginx:alpine
-    container_name: frontend
-    restart: always
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${FRONTEND_PORT}:80"
+
+
+
 
 volumes:
   pgdata:

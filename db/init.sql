@@ -1,54 +1,57 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- =========[ опционально ]=========
+-- CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- =========================
+-- Пользователи
+-- =========================
 CREATE TABLE IF NOT EXISTS users (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(255) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,          -- без хеша, по требованию ТЗ
-    role VARCHAR(64) NOT NULL                -- admin | uploader | runner | viewer | exporter
+    id       BIGSERIAL PRIMARY KEY,
+    name     VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,      -- без хэша (по ТЗ)
+    role     VARCHAR(64)  NOT NULL       -- admin | uploader | runner | viewer | exporter
 );
 
+-- Администратор по умолчанию
+INSERT INTO users (name, password, role)
+VALUES ('admin','admin','admin')
+ON CONFLICT (name) DO NOTHING;
+
+-- =========================
+-- Фото (как ожидает photo-service)
+-- =========================
 CREATE TABLE IF NOT EXISTS photos (
-    id BIGSERIAL PRIMARY KEY,
-    created     TIMESTAMPTZ DEFAULT now(),
-    updated     TIMESTAMPTZ DEFAULT now(),
-    deleted     BOOLEAN     DEFAULT FALSE,
+    id         BIGSERIAL PRIMARY KEY,
+    created    TIMESTAMPTZ DEFAULT now(),
 
-    uuid        UUID UNIQUE NOT NULL,
-    orig_name   VARCHAR(512) NOT NULL,
-    stored_name VARCHAR(512) NOT NULL,   -- <uuid>.<ext>
-    mime_type   VARCHAR(128),
-    size_bytes  BIGINT,
+    -- базовые поля, которые использует код
+    name       VARCHAR(512) NOT NULL,    -- имя сохранённого файла (stored), в коде — saved_name
+    uuid       UUID UNIQUE NOT NULL,     -- логический идентификатор файла (используется в URL)
 
-    type1       VARCHAR(32),             -- "мусор" | "стройка"
-    type2       VARCHAR(32),             -- "КИНС" | "ИНС" | "Другое"
+    -- опционально: размер картинки (используется экспортом/отладкой)
+    width      INTEGER,
+    height     INTEGER,
 
-    building    VARCHAR(255),            -- краткое описание здания
-    address     VARCHAR(512),            -- почтовый адрес
-    latitude    DOUBLE PRECISION,
-    longitude   DOUBLE PRECISION,
+    -- опционально: сырые exif (сейчас не заполняются, но оставим)
+    exif_lat   DOUBLE PRECISION,
+    exif_lon   DOUBLE PRECISION,
 
-    source      VARCHAR(64)              -- источник изображения (для фильтра)
+    -- типы под сценарий
+    type       VARCHAR(64),              -- например: "стройка" | "мусор"
+    subtype    VARCHAR(64),              -- например: "ИНС" | "КИНС"
+
+    -- координаты точки съёмки (то, что код называет shot_lat / shot_lon)
+    shot_lat   DOUBLE PRECISION,
+    shot_lon   DOUBLE PRECISION
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_uuid ON photos (uuid);
-CREATE INDEX IF NOT EXISTS idx_photos_geo  ON photos (latitude, longitude);
+CREATE INDEX IF NOT EXISTS idx_photos_shot ON photos (shot_lat, shot_lon);
 
--- История запросов (пространства запросов)
-CREATE TABLE IF NOT EXISTS queries (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT REFERENCES users(id),
-    name VARCHAR(255),
-    created TIMESTAMPTZ DEFAULT now(),
-    filter JSONB
-);
-
--- история запросов пользователей
-CREATE TABLE IF NOT EXISTS queries (
-    id       BIGSERIAL PRIMARY KEY,
-    user_id  BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name     VARCHAR(255) NOT NULL,
-    filter   JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created  TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_queries_user_created ON queries (user_id, created DESC);
+-- =========================
+-- Найденные объекты (bbox + оценка)
+-- =========================
+CREATE TABLE IF NOT EXISTS detected_objects (
+    id           BIGSERIAL PRIMARY KEY,
+    photo_id     BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    label        VARCHAR(64) NOT NULL DEFAULT 'object',
+    confidence   DOUBLE PRECISI
