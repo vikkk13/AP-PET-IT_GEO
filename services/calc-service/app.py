@@ -137,17 +137,6 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
             (250, 170, 30)    # оранжевый
         ]
         
-        # Функция для получения цвета по id
-        def get_color_by_id(detection_id):
-            try:
-                # Извлекаем номер из id (id1 -> 1, id2 -> 2, etc.)
-                id_num = int(detection_id[2:])  # Убираем "id" и преобразуем в число
-                # Используем циклический выбор цвета
-                return COLOR_PALETTE[(id_num - 1) % len(COLOR_PALETTE)]
-            except:
-                # Если не удалось распарсить id, используем первый цвет
-                return COLOR_PALETTE[0]
-        
         # Загружаем изображение
         image = download_image(image_url)
         width, height = image.size
