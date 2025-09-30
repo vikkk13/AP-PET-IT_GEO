@@ -1,0 +1,23 @@
+{
+  "count": 1,
+  "provider": "custom",
+  "results": [
+    {
+      "id": "test_photo_1",
+      "origin_screenshot_id": "test_photo_1",
+      "device": "manual-device",
+      "camera": "manual-camera",
+      "create_timestamp": 1754027661,
+      "image": "test_photo_1.jpg",
+      "image_type": 0,
+      "issues": [],
+      "latitude": 55.804111,
+      "longitude": 37.749822,
+      "angle": null,
+      "speed": null,
+      "valid": true,
+      "height": null,
+      "ptz_position": null
+    }
+  ]
+}

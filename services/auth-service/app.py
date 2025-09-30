@@ -61,6 +61,32 @@ def login():
     # НИКАКИХ токенов — просто возвращаем пользователя.
     return {"user": {"id": uid, "name": uname, "role": urole}}, 200
 
+@app.get("/users")
+def list_users():
+    """
+    Вернёт список пользователей: id, name, role, created.
+    WARNING: сейчас без авторизации (MVP). На проде закрой доступ!
+    """
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, role, created
+                FROM users
+                ORDER BY id DESC
+            """)
+            rows = cur.fetchall()
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+    return {
+        "users": [
+            {"id": r[0], "name": r[1], "role": r[2], "created": r[3].isoformat() if hasattr(r[3], "isoformat") else r[3]}
+            for r in rows
+        ]
+    }, 200
+
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)

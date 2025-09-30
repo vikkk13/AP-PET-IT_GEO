@@ -8,6 +8,8 @@ import imghdr
 import uuid as _uuid
 from math import radians, sin, cos, sqrt, atan2
 from pathlib import Path
+import random
+
 
 import psycopg
 from flask import Flask, request, jsonify, send_from_directory, abort
@@ -36,6 +38,9 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
 INSTALL_DIR = Path(os.getenv("INSTALL_DIR", "/app/install")).resolve()
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "/app/model")).resolve()
 MAX_CONTENT_LENGTH = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+CENTER_LAT = 55.804111
+CENTER_LON = 37.749822
+
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
@@ -341,16 +346,38 @@ def healthz():
 
 @app.get("/photos")
 def photos_list():
+    # pagination: /photos?limit=50&offset=0
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except Exception:
+        limit = 50
+    try:
+        offset = int(request.args.get("offset", "0"))
+    except Exception:
+        offset = 0
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
     with get_conn() as conn, conn.cursor() as cur:
+        # 1) Считаем общее количество (для total)
+        cur.execute("SELECT COUNT(*) FROM photos")
+        total = cur.fetchone()[0]
+
+        # 2) Отдаём текущую страницу
         cur.execute("""
             SELECT id, uuid::text, name, width, height, created, type, subtype, shot_lat, shot_lon
-            FROM photos ORDER BY id DESC
-        """)
+            FROM photos
+            ORDER BY id DESC
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
         rows = cur.fetchall()
+
     return {
+        "total": total,
         "photos": [
             {"id": r[0], "uuid": r[1], "name": r[2], "width": r[3], "height": r[4],
-             "created": r[5].isoformat(), "type": r[6], "subtype": r[7], "shot_lat": r[8], "shot_lon": r[9]}
+             "created": r[5].isoformat(), "type": r[6], "subtype": r[7],
+             "shot_lat": r[8], "shot_lon": r[9]}
             for r in rows
         ]
     }
@@ -457,77 +484,87 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 @app.get("/search")
 def search_by_coords():
-    """GET /search?lat=..&lon=..&radius_m=50&limit=5"""
+    """GET /search?lat=..&lon=..&limit=12  -> топ-N ближайших фото (по dist_m)"""
     try:
         lat = float(request.args.get("lat"))
         lon = float(request.args.get("lon"))
     except Exception:
         return {"error":"lat/lon required"}, 400
-    radius_m = float(request.args.get("radius_m", "50"))
-    limit = int(request.args.get("limit", "5"))
 
+    try:
+        limit = int(request.args.get("limit", "12"))
+    except Exception:
+        limit = 12
+    limit = max(1, min(limit, 200))
+
+    # тянем все фото с координатами
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, uuid::text, name, shot_lat, shot_lon FROM photos")
+        cur.execute("""
+            SELECT id, uuid::text, name, shot_lat, shot_lon
+            FROM photos
+            WHERE shot_lat IS NOT NULL AND shot_lon IS NOT NULL
+        """)
         rows = cur.fetchall()
 
+    # считаем расстояние до каждой точки и берём топ-N
     items = []
-    for r in rows:
-        pid, uid, name, slat, slon = r
-        if slat is None or slon is None:
-            dist = float("inf")
-        else:
-            dist = haversine_m(lat, lon, float(slat), float(slon))
-        items.append({"id":pid,"uuid":uid,"name":name,"dist_m":dist,"shot_lat":slat,"shot_lon":slon})
+    for pid, uid, name, slat, slon in rows:
+        dist = haversine_m(lat, lon, float(slat), float(slon))
+        items.append({
+            "id": pid, "uuid": uid, "name": name,
+            "dist_m": dist, "shot_lat": slat, "shot_lon": slon
+        })
 
-    within = [x for x in items if x["dist_m"] <= radius_m]
-    if within:
-        within.sort(key=lambda x: x["dist_m"])
-        res = within[:limit]
-    else:
-        items.sort(key=lambda x: x["dist_m"])
-        res = items[:limit]
+    items.sort(key=lambda x: x["dist_m"])
+    res = items[:limit]
 
-    _insert_history("search", {"lat": lat, "lon": lon, "radius_m": radius_m, "returned": len(res)})
+    _insert_history("search_knn", {"lat": lat, "lon": lon, "limit": limit, "returned": len(res)})
     return {"results": res}
+
 
 @app.post("/calc_for_photo")
 def calc_for_photo():
-    """Имитация модели: создать 2 'house' с conf=0.89 в окрестности shot_lat/lon (±50 м)."""
+    """
+    Имитация модели: для указанного photo_id создать 2 "house"
+    с bbox-ами и координатами вокруг (CENTER_LAT, CENTER_LON) ±50 м.
+    """
     data = request.get_json(silent=True) or {}
     try:
         photo_id = int(data.get("photo_id"))
     except Exception:
-        return {"error":"photo_id required"}, 400
+        return {"error": "photo_id required"}, 400
 
+    # Убедимся, что фото существует (ширина/высота не обязательны)
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT width, height, shot_lat, shot_lon FROM photos WHERE id=%s", (photo_id,))
+        cur.execute("SELECT id FROM photos WHERE id=%s", (photo_id,))
         row = cur.fetchone()
         if not row:
-            return {"error":"photo not found"}, 404
-        w,h,slat,slon = row
+            return {"error": "photo not found"}, 404
 
-        base_lat = float(slat or 0.0)
-        base_lon = float(slon or 0.0)
-
+        # Функция «дрожания» координат на ±meters
         def jitter(lat, lon, meters=50.0):
             dlat = (random.uniform(-meters, meters)) / 111320.0
             dlng = (random.uniform(-meters, meters)) / (111320.0 * max(cos(radians(lat)), 1e-6))
             return lat + dlat, lon + dlng
 
+        # Два произвольных bbox'а и координаты вокруг центра
         dets = []
         for bx in [(10,10,120,120), (140,20,260,180)]:
-            lat, lon = jitter(base_lat, base_lon, 50.0)
+            lat, lon = jitter(CENTER_LAT, CENTER_LON, 50.0)
             dets.append({"label":"house","confidence":0.89,"bbox":bx,"lat":lat,"lon":lon})
 
+        # Сохраняем в БД
         for d in dets:
             x1,y1,x2,y2 = d["bbox"]
             cur.execute("""
-                INSERT INTO detected_objects (photo_id,label,confidence,x1,y1,x2,y2,latitude,longitude)
+                INSERT INTO detected_objects
+                    (photo_id,label,confidence,x1,y1,x2,y2,latitude,longitude)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (photo_id, d["label"], d["confidence"], x1,y1,x2,y2, d["lat"], d["lon"]))
 
     _insert_history("calc", {"photo_id": photo_id, "created": 2})
-    return {"message":"Проанализирована 1 фото, обнаружено 2 дома. Уверенность — 89%."}, 200
+    return {"message": "Проанализирована 1 фото, обнаружено 2 дома. Уверенность — 89%."}, 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT","5002")))

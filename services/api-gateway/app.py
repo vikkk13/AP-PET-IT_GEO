@@ -49,6 +49,14 @@ def api_login():
     r = requests.post(urljoin(AUTH_URL, "/login"), json=request.get_json(silent=True) or {})
     return relay(r)
 
+
+# ---------- users list (admin-only на сервере желательно) ----------
+@app.get("/api/users")
+def api_users():
+    r = requests.get(urljoin(AUTH_URL, "/users"), params=request.args)
+    return relay(r)
+
+
 # ---------- photos / objects ----------
 @app.get("/api/photos")
 def api_photos():
@@ -103,15 +111,29 @@ def api_search_addr():
     g = requests.post(urljoin(COORDS_URL, "/geocode"), json={"query": q})
     if g.status_code != 200:
         return relay(g)
+
     latlon = g.json() if g.text else {}
     params = {
         "lat": latlon.get("lat"),
         "lon": latlon.get("lon"),
-        "radius_m": request.args.get("radius_m", 50),
-        "limit": request.args.get("limit", 5),
+        "limit": request.args.get("limit", 12),  # только топ-N ближайших
     }
     r = requests.get(urljoin(PHOTO_URL, "/search"), params=params)
     return relay(r)
+
+
+@app.get("/api/search_coords")
+def api_search_coords():
+    # ожидает ?lat=..&lon=..&limit=12
+    r = requests.get(urljoin(PHOTO_URL, "/search"), params=request.args)
+    return relay(r)
+
+@app.get("/api/search_name")
+def api_search_name():
+    # ожидает ?q=substring&limit=25&offset=0
+    r = requests.get(urljoin(PHOTO_URL, "/search_by_name"), params=request.args)
+    return relay(r)
+
 
 # ---------- «расчёт координат» (имитация) ----------
 @app.post("/api/calc_for_photo")
@@ -122,8 +144,14 @@ def api_calc_for_photo():
 # ---------- экспорт ----------
 @app.post("/api/export_xlsx")
 def api_export_xlsx():
-    r = requests.post(urljoin(EXPORT_URL, "/export_xlsx"))
+    payload = request.get_json(silent=True) or {}
+    # основная цель — /export_xlsx
+    r = requests.post(urljoin(EXPORT_URL, "/export_xlsx"), json=payload)
+    # если на export-service такого роутa нет — пробуем старый /export
+    if r.status_code == 404:
+        r = requests.post(urljoin(EXPORT_URL, "/export"), json=payload)
     return relay(r)
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
