@@ -16,5 +16,5 @@
 ## 1) Клонирование
 
 ```bash
-git clone https://github.com/имя_пользователя/имя_репозитория.git
-cd имя_репозитория
+git clone https://github.com/vikkk13/AP-PET-IT_GEO.git
+cd AP-PET-IT_GEO
