@@ -1,13 +1,3 @@
-<!-- services/api-gateway/static/index.html
-     GeoLocate MVP — страница без сборщиков:
-     - Регистрация/Вход
-     - Загрузка фото + предпросмотр
-     - Импорт ZIP с предпросмотром (пагинация)
-     - Поиск по адресу/координатам (карта + превью)
-     - Список фото с пагинацией
-     - Запуск расчёта + превью bbox
-     - Экспорт в Excel
--->
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -32,31 +22,19 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
   <style>
-/* ========== дизайн-пак GeoLocate ========== */
 :root{
-  --bg:#f6f7fb;
-  --surface:#ffffff;
-  --text:#111827;
-  --subtext:#6b7280;
-  --border:#e5e7eb;
-  --accent:#2563eb;
-  --accent-2:#1e40af;
-  --accent-3:#3b82f6;
-  --ok:#16a34a;
-  --warn:#d97706;
-  --danger:#dc2626;
+  --bg:#f6f7fb; --surface:#fff; --text:#111827; --subtext:#6b7280; --border:#e5e7eb;
+  --accent:#2563eb; --accent-2:#1e40af; --accent-3:#3b82f6;
+  --ok:#16a34a; --warn:#d97706; --danger:#dc2626;
   --shadow:0 10px 30px rgba(2,6,23,.08),0 2px 8px rgba(2,6,23,.06);
   --radius:14px;
 }
 @media (prefers-color-scheme: dark){
-  :root{
-    --bg:#0b1220; --surface:#0f172a; --text:#e5e7eb; --subtext:#9ca3af; --border:#1f2937;
+  :root{ --bg:#0b1220; --surface:#0f172a; --text:#e5e7eb; --subtext:#9ca3af; --border:#1f2937;
     --accent:#60a5fa; --accent-2:#3b82f6; --accent-3:#93c5fd;
     --shadow:0 10px 30px rgba(0,0,0,.35),0 2px 8px rgba(0,0,0,.25);
   }
 }
-
-/* базовая типографика + фон */
 html,body{height:100%}
 body{
   margin:16px;
@@ -67,8 +45,6 @@ body{
   color:var(--text);
   font:14px/1.45 system-ui, Segoe UI, Roboto, Arial, sans-serif;
 }
-
-/* верхняя панель */
 header{
   display:flex; gap:12px; align-items:center; padding:10px 12px;
   background:linear-gradient(135deg, rgba(37,99,235,.10), rgba(99,102,241,.10));
@@ -80,7 +56,6 @@ header{
 .row{display:flex; gap:16px; flex-wrap:wrap;}
 .spacer{flex:1}
 
-/* карточки */
 .card{
   background:var(--surface); border:1px solid var(--border);
   border-radius:var(--radius); padding:14px; box-shadow:var(--shadow);
@@ -88,9 +63,8 @@ header{
 }
 .card h3{margin:0 0 8px 0; font-size:16px}
 
-/* поля */
 label{display:block; margin-top:8px; color:var(--subtext)}
-input[type="text"], input[type="password"], input[type="number"], select{
+input[type="text"], input[type="password"], input[type="number"], select, input[type="date"]{
   width:240px; padding:10px 12px; color:var(--text); background:transparent;
   border:1px solid var(--border); border-radius:10px; outline:none;
   transition: box-shadow .15s, border-color .15s, background-color .2s ease;
@@ -101,7 +75,6 @@ input:focus, select:focus{
   box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
-/* кнопки */
 button{
   appearance:none; border:1px solid var(--accent);
   background:linear-gradient(180deg, var(--accent), var(--accent-2));
@@ -119,10 +92,16 @@ button[disabled]{opacity:.6; cursor:not-allowed; box-shadow:none}
   box-shadow:0 6px 16px rgba(2,6,23,.08);
 }
 
-/* пагинация/панели */
 .pager{display:flex; gap:10px; align-items:center; margin:8px 0; flex-wrap:wrap}
 .pager #photos_page_info, .pager #uploads_page_info{color:var(--subtext); font-weight:600}
 .pager select{width:auto; padding:8px 10px; border-radius:8px}
+
+/* Гладкая панель фильтров внутри карточек */
+.card .toolbar{
+  display:flex; flex-wrap:wrap; gap:10px; align-items:end; width:100%; margin:6px 0 10px;
+}
+.card .toolbar label{margin:0;}
+.card .toolbar input[type="date"]{width:auto}
 
 /* таблицы */
 table{border-collapse:separate; border-spacing:0; width:100%; background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden}
@@ -135,7 +114,7 @@ tbody tr:last-child td{border-bottom:none}
 /* карта */
 #map{width:100%; height:360px; border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow)}
 
-/* грид превью из поиска/координат — компактнее */
+/* превью сетки поиска */
 #search_results, #coords_results{
   display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr));
   gap:12px; margin-top:12px;
@@ -169,7 +148,7 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
 #calc_preview_thumbs a{max-width:160px}
 #calc_preview_thumbs img{width:100%; height:100px; object-fit:cover; display:block; border-radius:6px}
 
-/* Leaflet: убрать иконки атрибуции */
+/* Leaflet attribution скрыть */
 .leaflet-control-attribution img, .leaflet-control-attribution svg{display:none !important}
 .leaflet-control-attribution::before, .leaflet-control-attribution::after{content:none !important; display:none !important}
   </style>
@@ -177,7 +156,6 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
 <body>
   <h1>GeoLocate MVP</h1>
 
-  <!-- Статус авторизации -->
   <header>
     <div id="authStatus">Гость</div>
     <button id="logoutBtn" style="display:none;">Выйти</button>
@@ -215,14 +193,11 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
     <div class="card" id="cardUpload" style="min-width:420px;">
       <h3>Загрузка</h3>
 
-      <!-- Кнопки выбора файлов -->
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <!-- Фото -->
         <input id="file" type="file" accept="image/*" style="display:none">
         <button id="btnPickPhoto" type="button">Загрузить фото</button>
         <span id="file_info" style="color:#666;">Фото не выбрано</span>
 
-        <!-- ZIP -->
         <input id="zip" type="file" accept=".zip" style="display:none">
         <button id="btnPickZip" type="button">Загрузить ZIP</button>
         <span id="zip_info" style="color:#666;">ZIP не выбран</span>
@@ -244,38 +219,32 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
       </div>
 
       <!-- Параметры -->
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+        <input id="shot_lat" type="number" step="any" placeholder="lat">
+        <input id="shot_lon" type="number" step="any" placeholder="lon">
 
-<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
-  <input id="shot_lat" type="number" step="any" placeholder="lat">
-  <input id="shot_lon" type="number" step="any" placeholder="lon">
+        <select id="type" style="width:240px">
+          <option value="Мусор">Мусор</option>
+          <option value="Стройка">Стройка</option>
+        </select>
 
-  <!-- type: Мусор / Стройка -->
-  <select id="type" style="width:240px">
-    <option value="Мусор">Мусор</option>
-    <option value="Стройка">Стройка</option>
-  </select>
+        <select id="subtype" style="width:240px">
+          <option value="ИНС">ИНС</option>
+          <option value="КИНС">КИНС</option>
+          <option value="Другое">Другое</option>
+        </select>
+      </div>
 
-  <!-- subtype: ИНС / КИНС / Другое -->
-  <select id="subtype" style="width:240px">
-    <option value="ИНС">ИНС</option>
-    <option value="КИНС">КИНС</option>
-    <option value="Другое">Другое</option>
-  </select>
-</div>
-
-
-      <!-- Превью выбранного изображения -->
+      <!-- Превью одиночного файла -->
       <div id="file_preview_wrap" class="preview-wrap" style="display:none;">
         <img id="file_preview" alt="preview">
       </div>
 
-      <!-- Кнопки импорта -->
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px;">
         <button id="btnUpload" type="button">Импорт фото</button>
         <button id="btnUploadZip" type="button">Импорт ZIP</button>
       </div>
 
-      <!-- Статусы -->
       <div id="upload_out" style="margin-top:6px; color:#444;"></div>
       <div id="zip_out" style="margin-top:6px; color:#444;"></div>
     </div>
@@ -311,9 +280,24 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
   <hr/>
 
   <div class="row">
-    <!-- Фотографии + пагинация -->
+    <!-- Фотографии + фильтры + пагинация -->
     <div class="card" style="min-width:380px; flex:1 1 520px;">
       <h3>Фотографии</h3>
+
+      <!-- ФИЛЬТРЫ ВНУТРИ КАРТОЧКИ -->
+      <div class="toolbar">
+        <label>Статус координат
+          <select id="photos_filter_status" style="width:auto">
+            <option value="all" selected>Все</option>
+            <option value="with">Есть lat/lon</option>
+            <option value="without">Нет lat/lon</option>
+          </select>
+        </label>
+        <label>с <input id="photos_date_from" type="date"></label>
+        <label>по <input id="photos_date_to" type="date"></label>
+        <button id="btnApplyPhotosFilter" type="button" class="btn-secondary">Применить</button>
+      </div>
+
       <div class="pager">
         <div>
           На странице:
@@ -331,12 +315,27 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
         <button id="btnNextPhotos" type="button">След →</button>
         <button id="btnLoadPhotos" type="button" title="Обновить текущую страницу">Обновить</button>
       </div>
+
       <div id="photos"></div>
     </div>
 
     <!-- Запуск расчёта координат (admin) -->
     <div class="card" id="cardCalc" style="min-width:420px; display:none;">
       <h3>Запуск расчёта координат</h3>
+
+      <!-- ФИЛЬТРЫ ВНУТРИ КАРТОЧКИ -->
+      <div class="toolbar">
+        <label>Статус
+          <select id="calc_filter_status">
+            <option value="all" selected>Все</option>
+            <option value="without">Нерасчитанные (нет lat/lon)</option>
+            <option value="with">Рассчитанные (есть lat/lon)</option>
+          </select>
+        </label>
+        <label>с <input id="calc_date_from" type="date"></label>
+        <label>по <input id="calc_date_to" type="date"></label>
+        <button id="btnApplyUploadsFilter" type="button" class="btn-secondary">Применить</button>
+      </div>
 
       <div class="pager">
         <div>На странице: 5</div>
@@ -350,19 +349,23 @@ pre, #reg_out, #login_out, #upload_out, #zip_out, #calc_out, #search_meta, #coor
       <div id="uploads"></div>
 
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
-        <button id="btnRunCalc" type="button" disabled>Рассчитать / Определить координаты домов</button>
+        <button id="btnRunCalc" type="button" disabled>
+          Рассчитать / Определить координаты домов
+        </button>
       </div>
 
       <div id="calc_out" style="margin-top:6px; color:#444;"></div>
 
       <div id="calc_preview_wrap" style="display:none; margin-top:10px;">
         <div style="font-size:12px;color:#555; margin-bottom:6px;">Превью результата</div>
-        <img id="calc_preview" alt="calc preview" style="max-width:100%; border:1px solid #e5e7eb; border-radius:8px; display:block;">
-        <div id="calc_preview_thumbs" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; margin-top:8px;"></div>
+        <img id="calc_preview" alt="calc preview"
+             style="max-width:100%; border:1px solid #e5e7eb; border-radius:8px; display:block;">
+        <div id="calc_preview_thumbs"
+             style="display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; margin-top:8px;"></div>
       </div>
     </div>
 
-    <!-- Экспорт (admin) -->
+    <!-- Экспорт -->
     <div class="card" id="cardExport" style="min-width:420px; display:none;">
       <h3>Выгрузка в Excel</h3>
 
