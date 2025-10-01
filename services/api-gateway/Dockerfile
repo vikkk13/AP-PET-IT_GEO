@@ -6,7 +6,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # копируем код и статику
 COPY app.py .
-COPY static ./static
 
 ENV PORT=5000
 CMD ["python", "app.py"]

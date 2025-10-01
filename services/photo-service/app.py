@@ -336,6 +336,205 @@ try:
 except Exception as e:
     _insert_history("init_import_error", {"error": str(e)})
 
+import io, os, uuid, zipfile, json, math
+from datetime import datetime
+from flask import request, jsonify
+from PIL import Image
+import psycopg2
+
+# константы/окружение
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+ZIP_MAX_FILES = int(os.getenv("ZIP_MAX_FILES", "500"))
+ZIP_MAX_UNCOMPRESSED_MB = int(os.getenv("ZIP_MAX_UNCOMPRESSED_MB", "1024"))  # ~1 GB
+ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+DB_DSN = (
+    f"dbname={os.getenv('POSTGRES_DB', 'geolocate_db')} "
+    f"user={os.getenv('POSTGRES_USER', 'geolocate_user')} "
+    f"password={os.getenv('POSTGRES_PASSWORD', 'StrongPass123!')} "
+    f"host={os.getenv('POSTGRES_HOST', 'db')} port={os.getenv('POSTGRES_PORT', '5432')}"
+)
+
+def _ext(name: str) -> str:
+    return os.path.splitext(name.lower())[-1]
+
+def _safe_member_name(name: str) -> str:
+    # защита от zip-slip: убираем абсолютные пути и подъемы ".."
+    name = name.replace("\\", "/")
+    name = name.lstrip("/")
+    parts = [p for p in name.split("/") if p not in ("", ".", "..")]
+    return "/".join(parts)
+
+def _read_img_dims(buf: bytes):
+    with Image.open(io.BytesIO(buf)) as im:
+        w, h = im.size
+    return w, h
+
+def _insert_photo(cur, stored_name, file_uuid, w, h, meta):
+    cur.execute("""
+        INSERT INTO photos (name, uuid, width, height, type, subtype, shot_lat, shot_lon)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, created
+    """, (
+        stored_name, file_uuid, w, h,
+        meta.get("type"), meta.get("subtype"),
+        meta.get("lat"), meta.get("lon"),
+    ))
+    return cur.fetchone()  # (id, created)
+
+def _merge_meta(defaults, manifest_entry, sidecar):
+    """Приоритет: sidecar.json > manifest.json > defaults (из формы)"""
+    out = dict(defaults or {})
+    if manifest_entry:
+        out.update({k: v for k, v in manifest_entry.items() if v not in (None, "")})
+    if sidecar:
+        out.update({k: v for k, v in sidecar.items() if v not in (None, "")})
+    # нормализуем численные
+    for k in ("lat", "lon"):
+        if k in out:
+            try: out[k] = float(out[k])
+            except: out.pop(k, None)
+    return out
+
+@app.post("/upload_zip")
+def upload_zip():
+    """
+    Массовый импорт ZIP.
+    Поддерживаемые варианты метаданных для каждого фото:
+      A) sidecar: <basename>.json рядом с картинкой
+      B) manifest.json в корне архива:
+           {
+             "items": [
+               {"file": "dir/photo1.jpg", "lat": ..., "lon": ..., "type": "...", "subtype": "..."},
+               ...
+             ]
+           }
+      C) defaults: поля формы (type, subtype, shot_lat, shot_lon)
+    Приоритет: sidecar > manifest > defaults.
+    """
+    f = request.files.get("archive")
+    if not f:
+        return jsonify(error="no file field 'archive'"), 400
+
+    defaults = {}
+    if request.form.get("type"):     defaults["type"] = request.form["type"]
+    if request.form.get("subtype"):  defaults["subtype"] = request.form["subtype"]
+    if request.form.get("shot_lat"): defaults["lat"] = request.form["shot_lat"]
+    if request.form.get("shot_lon"): defaults["lon"] = request.form["shot_lon"]
+
+    # читаем zip в память (можно сделать временный файл, если архивы очень большие)
+    data = f.read()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except Exception as e:
+        return jsonify(error=f"bad zip: {e}"), 400
+
+    names = [n for n in zf.namelist() if not n.endswith("/")]
+    if len(names) > ZIP_MAX_FILES:
+        return jsonify(error=f"too many files in zip (> {ZIP_MAX_FILES})"), 400
+
+    # подсчёт суммарного распакованного размера и защита от zip bomb
+    total_uncompressed = 0
+    for zi in zf.infolist():
+        total_uncompressed += zi.file_size
+    if total_uncompressed > ZIP_MAX_UNCOMPRESSED_MB * 1024 * 1024:
+        return jsonify(error=f"uncompressed size exceeds {ZIP_MAX_UNCOMPRESSED_MB} MB"), 400
+
+    # читаем manifest.json (опционально)
+    manifest_map = {}
+    if "manifest.json" in names:
+        try:
+            raw = zf.read("manifest.json")
+            m = json.loads(raw.decode("utf-8", "ignore"))
+            for it in (m.get("items") or []):
+                fname = _safe_member_name(it.get("file") or "")
+                if fname:
+                    manifest_map[fname] = it
+        except Exception:
+            # игнорируем битый манифест
+            manifest_map = {}
+
+    results = []
+    errors = []
+
+    conn = psycopg2.connect(DB_DSN)
+    conn.autocommit = False
+    try:
+        with conn, conn.cursor() as cur:
+            for member in names:
+                safe_name = _safe_member_name(member)
+                ext = _ext(safe_name)
+                if ext not in ALLOWED_EXTS:
+                    # пробуем как sidecar json — пропускаем, но не ошибка
+                    if ext == ".json":
+                        continue
+                    errors.append({"file": member, "error": "unsupported extension"})
+                    continue
+
+                try:
+                    # sidecar по базовому имени (file.jpg -> file.json) относительно каталога
+                    base, _ = os.path.splitext(safe_name)
+                    sidecar_json = None
+                    if f"{base}.json" in names:
+                        try:
+                            sidecar_raw = zf.read(f"{base}.json")
+                            sidecar_json = json.loads(sidecar_raw.decode("utf-8", "ignore"))
+                        except Exception:
+                            sidecar_json = None
+
+                    manifest_entry = manifest_map.get(safe_name)
+                    meta = _merge_meta(defaults, manifest_entry, sidecar_json)
+
+                    # читаем картинку
+                    img_bytes = zf.read(member)
+                    w, h = _read_img_dims(img_bytes)
+
+                    file_uuid = str(uuid.uuid4())
+                    stored_name = f"{file_uuid}{ext}"
+                    out_path = os.path.join(UPLOAD_DIR, stored_name)
+
+                    # сохраняем файл
+                    with open(out_path, "wb") as out:
+                        out.write(img_bytes)
+
+                    # insert
+                    pid, created = _insert_photo(cur, stored_name, file_uuid, w, h, meta)
+
+                    results.append({
+                        "file": member,
+                        "id": pid,
+                        "uuid": file_uuid,
+                        "name": stored_name,
+                        "width": w,
+                        "height": h,
+                        "lat": meta.get("lat"),
+                        "lon": meta.get("lon"),
+                        "type": meta.get("type"),
+                        "subtype": meta.get("subtype"),
+                        "created": created.isoformat() if isinstance(created, datetime) else str(created),
+                    })
+
+                except Exception as e:
+                    errors.append({"file": member, "error": str(e)})
+            # если дошли сюда — коммитим
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+    finally:
+        conn.close()
+
+    return jsonify({
+        "ok": True,
+        "imported": len(results),
+        "skipped": len(errors),
+        "results": results,
+        "errors": errors
+    })
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def too_large(e):
     return {"error": f"file too large (> {MAX_CONTENT_LENGTH//1024//1024} MB)"}, 413
@@ -564,6 +763,105 @@ def calc_for_photo():
 
     _insert_history("calc", {"photo_id": photo_id, "created": 2})
     return {"message": "Проанализирована 1 фото, обнаружено 2 дома. Уверенность — 89%."}, 200
+
+
+# --- NEW: metadata for a single photo by id
+@app.get("/photo_meta")
+def photo_meta():
+    try:
+        photo_id = int(request.args.get("id", "0"))
+    except Exception:
+        return {"error": "id required"}, 400
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, uuid::text, name, width, height, shot_lat, shot_lon, created
+            FROM photos WHERE id=%s
+        """, (photo_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"error":"photo not found"}, 404
+        return {
+            "photo": {
+                "id": row[0], "uuid": row[1], "name": row[2],
+                "width": row[3], "height": row[4],
+                "shot_lat": row[5], "shot_lon": row[6],
+                "created": row[7].isoformat() if row[7] else None
+            }
+        }
+
+# --- NEW: insert one detection
+@app.post("/detect")
+def detect_insert():
+    data = request.get_json(silent=True) or {}
+    try:
+        photo_id = int(data.get("photo_id"))
+    except Exception:
+        return {"error": "photo_id required"}, 400
+
+    label = (data.get("label") or "house")[:64]
+    conf = float(data.get("confidence") or 0.0)
+
+    # Поддержка форматов bbox: либо массив [x1,y1,x2,y2], либо поля x1..y2, либо JSON {x,y,w,h}
+    x1 = data.get("x1"); y1 = data.get("y1"); x2 = data.get("x2"); y2 = data.get("y2")
+    bbox = data.get("bbox")
+    if isinstance(bbox, dict) and all(k in bbox for k in ("x","y","w","h")):
+        x1 = int(bbox["x"]); y1 = int(bbox["y"])
+        x2 = x1 + int(bbox["w"]); y2 = y1 + int(bbox["h"])
+
+    try:
+        x1 = int(x1); y1 = int(y1); x2 = int(x2); y2 = int(y2)
+    except Exception:
+        return {"error":"invalid bbox"}, 400
+
+    lat = data.get("lat") or data.get("latitude")
+    lon = data.get("lon") or data.get("longitude")
+    try:
+        lat = float(lat) if lat is not None else None
+        lon = float(lon) if lon is not None else None
+    except Exception:
+        lat = lon = None
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO detected_objects (photo_id,label,confidence,x1,y1,x2,y2,latitude,longitude)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (photo_id, label, conf, x1,y1,x2,y2, lat, lon))
+        new_id = cur.fetchone()[0]
+    return {"id": new_id}, 201
+
+# --- NEW: bulk insert
+@app.post("/detect_bulk")
+def detect_bulk():
+    data = request.get_json(silent=True) or {}
+    items = data.get("items") or []
+    inserted = 0
+    with get_conn() as conn, conn.cursor() as cur:
+        for it in items:
+            try:
+                photo_id = int(it.get("photo_id"))
+                label = (it.get("label") or "house")[:64]
+                conf = float(it.get("confidence") or 0.0)
+                bbox = it.get("bbox")
+                x1 = it.get("x1"); y1 = it.get("y1"); x2 = it.get("x2"); y2 = it.get("y2")
+                if isinstance(bbox, dict) and all(k in bbox for k in ("x","y","w","h")):
+                    x1 = int(bbox["x"]); y1 = int(bbox["y"])
+                    x2 = x1 + int(bbox["w"]); y2 = y1 + int(bbox["h"])
+                x1 = int(x1); y1 = int(y1); x2 = int(x2); y2 = int(y2)
+                lat = it.get("lat") or it.get("latitude")
+                lon = it.get("lon") or it.get("longitude")
+                lat = float(lat) if lat is not None else None
+                lon = float(lon) if lon is not None else None
+            except Exception:
+                continue
+
+            cur.execute("""
+                INSERT INTO detected_objects (photo_id,label,confidence,x1,y1,x2,y2,latitude,longitude)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (photo_id, label, conf, x1,y1,x2,y2, lat, lon))
+            inserted += 1
+    return {"inserted": inserted}, 200
+
 
 
 if __name__ == "__main__":
