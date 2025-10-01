@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_file
 import logging
 import random
+import math
 import io
 import os
 import uuid
@@ -36,17 +37,14 @@ def download_image(image_url):
         logger.error(f"Error downloading image {image_url}: {e}")
         raise
 
-def generate_offset_coordinates(original_lat, original_lon, offset_meters=50):
-    """Генерация случайных координат со смещением от оригинальных"""
-    offset_deg = offset_meters * 0.000009
-    lat_offset = random.uniform(-offset_deg, offset_deg)
-    lon_offset = random.uniform(-offset_deg, offset_deg)
+def generate_offset_coordinates(lat, lon, offset=50):
+    """Генерирует случайные координаты в радиусе от указанной точки"""
+    if not lat or not lon: return None, None
+    lat, lon = float(lat), float(lon)
+    a, d = random.uniform(0, 2 * math.pi), random.uniform(0, offset ** 2) ** 0.5
+    return (lat + d * math.cos(a) / 111000, 
+            lon + d * math.sin(a) / (111000 * math.cos(math.radians(lat))))
     
-    obj_lat = float(original_lat) + lat_offset if original_lat else None
-    obj_lon = float(original_lon) + lon_offset if original_lon else None
-    
-    return obj_lat, obj_lon
-
 def detect_objects(image_url, lat, lon, method, seed):
     """
     Имитирует поиск объектов и возвращает список обнаружений
