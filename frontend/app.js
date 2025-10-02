@@ -1,14 +1,10 @@
 // ===================================================================
 // GeoLocate MVP — фронт без JWT (исправленная версия)
-// - Регистрация/Вход (localStorage)
-// - Загрузка фото (meta JSON из lat/lon/type/subtype)
-// - Предпросмотр выбранного файла
-// - Импорт ZIP + предпросмотр (пагинация, автозагрузка JSZip)
-// - Поиск по адресу/координатам (Leaflet)
-// - Список фото с пагинацией и фильтрами (coords/date)
-// - Запуск расчёта (admin) — фильтры скоуплены внутри #cardCalc
-// - Экспорт в Excel
 // ===================================================================
+
+/* ------------------------ Базовая конфигурация -------------------- */
+// Можно переопределить в index.html через <script>window.API_BASE=...</script>
+const API_BASE = (typeof window !== "undefined" && window.API_BASE) || "/api";
 
 /* ------------------------ Утилиты ------------------------ */
 const $  = (sel) => document.querySelector(sel);
@@ -17,7 +13,8 @@ const val = (sel) => ($(sel)?.value ?? "").trim();
 
 function setText(target, text) {
   const el = typeof target === "string" ? $(target) : target;
-  if (el) el.textContent = text;
+  if (!el) return;
+  el.textContent = text;
 }
 function show(target, on = true) {
   const el = typeof target === "string" ? $(target) : target;
@@ -64,6 +61,35 @@ function inDateRange(p, fromISO, toISO) {
   return true;
 }
 
+/* ---------------- Утилиты API --------------------------- */
+function isLikelyHtml(s) {
+  return typeof s === "string" && /<!doctype html>|<html[\s>]/i.test(s);
+}
+async function apiJSON(url, options = {}) {
+  const res  = await fetch(url, options);
+  const ctype = res.headers.get("content-type") || "";
+  const text = await res.text();
+
+  const parseJsonSafe = () => {
+    try { return text ? JSON.parse(text) : {}; }
+    catch { return {}; }
+  };
+
+  if (!res.ok) {
+    // дружелюбное сообщение вместо «простыни» HTML
+    if (isLikelyHtml(text)) throw new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim());
+    const data = parseJsonSafe();
+    const msg = (data && (data.error || data.message)) || text || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+
+  if (ctype.includes("application/json")) return parseJsonSafe();
+  // на всякий случай — если апи вернул не-json, но 200
+  return text ? { raw: text } : {};
+}
+const apiUrl = (path) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+const photoUrl = (uuid) => apiUrl(`/photos/${uuid}`);
+
 /* ---------------- Предпросмотр одиночного файла --------- */
 let _filePreviewURL = null;
 function updatePreview(file) {
@@ -74,7 +100,12 @@ function updatePreview(file) {
     img?.removeAttribute("src"); show(wrap, false); return;
   }
   _filePreviewURL = URL.createObjectURL(file);
-  if (img) img.src = _filePreviewURL;
+  if (img) {
+    img.src = _filePreviewURL;
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.onerror = () => { img.alt = "Не удалось отобразить превью"; };
+  }
   show(wrap, true);
   img?.addEventListener("load", () => {
     try { URL.revokeObjectURL(_filePreviewURL); } catch {}
@@ -134,6 +165,7 @@ async function renderZipPage(page = ZipState.page) {
   for (const item of slice) {
     const card = document.createElement("div"); card.className = "zip-thumb";
     const img  = document.createElement("img"); img.alt = item.name;
+    img.loading = "lazy"; img.decoding = "async";
     try { img.src = await getEntryObjectURL(item.entry); } catch { continue; }
     const meta = document.createElement("div"); meta.className = "meta";
     meta.title = `${item.name} (${(item.size/1024).toFixed(1)} KB)`; meta.textContent = item.name;
@@ -168,20 +200,6 @@ async function loadZipPreview(file) {
   }
 }
 
-/* ---------------- Fetch helper --------------------------- */
-async function apiJSON(url, options = {}) {
-  const res  = await fetch(url, options);
-  const text = await res.text();
-  try {
-    const data = text ? JSON.parse(text) : {};
-    if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
-    return data;
-  } catch (e) {
-    if (!res.ok) throw new Error(text || e.message);
-    return {};
-  }
-}
-
 /* ---------------- Auth ----------------------------------- */
 function saveUser(user) { localStorage.setItem("user", JSON.stringify(user || null)); }
 function getUser() { try { return JSON.parse(localStorage.getItem("user")); } catch { return null; } }
@@ -208,7 +226,7 @@ async function register() {
   const role = allowedRoles.includes(chosen) ? chosen : "viewer";
   setText("#reg_out", "...");
   try {
-    const data = await apiJSON("/api/register", {
+    const data = await apiJSON(apiUrl("/register"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, password, role })
     });
@@ -220,7 +238,7 @@ async function login() {
   const password = $("#login_pass")?.value ?? "";
   setText("#login_out", "...");
   try {
-    const data = await apiJSON("/api/login", {
+    const data = await apiJSON(apiUrl("/login"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, password })
     });
@@ -261,7 +279,7 @@ async function loadPhotos(page = PhotosState.page, limit = PhotosState.pageSize)
   PhotosState.page = Math.max(1, page);
   PhotosState.pageSize = limit;
   const box = $("#photos");
-  if (box) box.textContent = "...";
+  if (box) box.textContent = "Загружаю…";
   const filter = getPhotosFilter();
   try {
     const offset = (PhotosState.page - 1) * PhotosState.pageSize;
@@ -272,11 +290,11 @@ async function loadPhotos(page = PhotosState.page, limit = PhotosState.pageSize)
       date_from:  filter.date_from,
       date_to:    filter.date_to
     });
-    let data = await apiJSON(`/api/photos${q}`);
+    const data = await apiJSON(apiUrl(`/photos${q}`));
     let photos = data.photos || [];
     PhotosState.total = Number(data.total || photos.length || 0);
 
-    // Клиентские фильтры — на случай, если сервер ещё не поддерживает
+    // Клиентские фильтры (подстраховка)
     if (filter.has_coords !== "all") {
       const need = (filter.has_coords === "true");
       photos = photos.filter(p => hasLatLon(p) === need);
@@ -289,7 +307,7 @@ async function loadPhotos(page = PhotosState.page, limit = PhotosState.pageSize)
     if (!photos.length) { box && (box.textContent = "Пусто"); return; }
 
     const rows = photos.map((p) => {
-      const link = `/api/photos/${p.uuid}`;
+      const link = photoUrl(p.uuid);
       const size = p.width && p.height ? `${p.width}×${p.height}` : "-";
       const lat  = (p.shot_lat ?? "").toString();
       const lon  = (p.shot_lon ?? "").toString();
@@ -310,7 +328,8 @@ async function loadPhotos(page = PhotosState.page, limit = PhotosState.pageSize)
       <thead><tr><th>id</th><th>name</th><th>size</th><th>lat/lon</th><th>created</th><th>status</th><th>file</th></tr></thead>
       <tbody>${rows}</tbody></table>`);
   } catch (e) {
-    box && (box.textContent = e.message);
+    // дружелюбное сообщение вместо HTML страницы ошибки
+    box && (box.textContent = e.message || "Ошибка загрузки списка");
   }
 }
 
@@ -343,7 +362,7 @@ async function upload() {
 
   out && (out.textContent = "Загрузка...");
   try {
-    const res  = await fetch("/api/upload", { method: "POST", body: fd });
+    const res  = await fetch(apiUrl("/upload"), { method: "POST", body: fd });
     const text = await res.text();
     let msg = text;
     try {
@@ -367,6 +386,7 @@ async function uploadZip() {
   if (!zf) { out && (out.textContent = "Выберите ZIP-архив"); return; }
 
   const fd = new FormData();
+  // поддержим оба поля (на сервере тоже поддерживаются)
   fd.append("archive", zf, zf.name);
   fd.append("zip", zf, zf.name);
 
@@ -377,7 +397,7 @@ async function uploadZip() {
 
   out && (out.textContent = "Импортирую ZIP...");
   try {
-    const res  = await fetch("/api/upload_zip", { method: "POST", body: fd });
+    const res  = await fetch(apiUrl("/upload_zip"), { method: "POST", body: fd });
     const text = await res.text();
     let msg = text;
     try {
@@ -399,7 +419,7 @@ async function loadUsers() {
   const box = $("#users_out");
   if (box) box.textContent = "...";
   try {
-    const data = await apiJSON("/api/users");
+    const data = await apiJSON(apiUrl("/users"));
     const arr = data.users || data || [];
     if (!Array.isArray(arr) || !arr.length) { box && (box.textContent = "Пусто"); return; }
     const rows = arr.map((u) => {
@@ -450,7 +470,7 @@ async function searchAddress() {
   if (grid) { grid.innerHTML = ""; show("#search_results", false); }
   showMap(false);
   try {
-    const data = await apiJSON(`/api/search_address?q=${encodeURIComponent(q)}`);
+    const data = await apiJSON(apiUrl(`/search_address?q=${encodeURIComponent(q)}`));
     outJson && (outJson.textContent = JSON.stringify(data, null, 2));
     const results = Array.isArray(data.results) ? data.results : [];
     const hasAddr = (data.lat != null && data.lon != null);
@@ -467,7 +487,7 @@ async function searchAddress() {
     if (results.length && grid) {
       results.forEach((r) => {
         if (r.shot_lat != null && r.shot_lon != null) {
-          const href = `/api/photos/${r.uuid}`;
+          const href = photoUrl(r.uuid);
           const title = `${r.name || r.uuid}`;
           const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
           const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
@@ -480,14 +500,14 @@ async function searchAddress() {
         }
       });
       grid.innerHTML = results.map((r) => {
-        const href = `/api/photos/${r.uuid}`;
+        const href = photoUrl(r.uuid);
         const title = `${r.name || r.uuid}`;
         const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
         const ll = (r.shot_lat != null && r.shot_lon != null) ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}` : "";
         return `
           <div class="card-photo">
             <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
-              <img src="${href}" alt="${title}">
+              <img src="${href}" alt="${title}" loading="lazy" decoding="async">
             </a>
             <div class="meta">
               <div class="ellipsis" title="${title}">${title}</div>
@@ -513,7 +533,7 @@ async function searchCoords() {
   showMap(false);
   if (Number.isNaN(lat) || Number.isNaN(lon)) { setText(meta, "Укажи корректные lat/lon"); return; }
   try {
-    const data = await apiJSON(`/api/search_coords?lat=${lat}&lon=${lon}&limit=${limit}`);
+    const data = await apiJSON(apiUrl(`/search_coords?lat=${lat}&lon=${lon}&limit=${limit}`));
     const results = Array.isArray(data.results) ? data.results : [];
     setText(meta, `Найдено: ${results.length} (топ-${limit} ближайших)`);
     if (results.length) {
@@ -523,7 +543,7 @@ async function searchCoords() {
     if (results.length && grid) {
       results.forEach((r) => {
         if (r.shot_lat != null && r.shot_lon != null) {
-          const href = `/api/photos/${r.uuid}`;
+          const href = photoUrl(r.uuid);
           const title = `${r.name || r.uuid}`;
           const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
           const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
@@ -536,14 +556,14 @@ async function searchCoords() {
         }
       });
       grid.innerHTML = results.map((r) => {
-        const href = `/api/photos/${r.uuid}`;
+        const href = photoUrl(r.uuid);
         const title = `${r.name || r.uuid}`;
         const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
         const ll = (r.shot_lat != null && r.shot_lon != null) ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}` : "";
         return `
           <div class="card-photo">
             <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
-              <img src="${href}" alt="${title}">
+              <img src="${href}" alt="${title}" loading="lazy" decoding="async">
             </a>
             <div class="meta">
               <div class="ellipsis" title="${title}">${title}</div>
@@ -562,7 +582,6 @@ async function searchCoords() {
 /* ---------------- Admin: загрузки + расчёт --------------- */
 const UploadsState = { page:1, pageSize:5, gotCount:0, total:0, selectedId:null };
 
-// Скоупленные селекторы для карточки расчёта (чтобы не ломаться из-за дублей ID)
 function calcScope() {
   const card = $("#cardCalc");
   return {
@@ -573,7 +592,6 @@ function calcScope() {
     applyBtn : card?.querySelector("#btnApplyUploadsFilter") || null
   };
 }
-// Скрыть возможные дубли вне карточки (если такие есть в разметке)
 function hideCalcFilterDuplicates() {
   const { card } = calcScope();
   const all = $$("#calc_filter_status, #calc_date_from, #calc_date_to, #btnApplyUploadsFilter");
@@ -609,7 +627,7 @@ function selectUpload(id) {
 async function loadUploads(page = UploadsState.page) {
   UploadsState.page = Math.max(1, page);
   const box = $("#uploads");
-  if (box) box.textContent = "...";
+  if (box) box.textContent = "Загружаю…";
   const filter = getCalcFilter();
   try {
     const offset = (UploadsState.page - 1) * UploadsState.pageSize;
@@ -620,7 +638,7 @@ async function loadUploads(page = UploadsState.page) {
       date_from:  filter.date_from,
       date_to:    filter.date_to
     });
-    let data = await apiJSON(`/api/photos${q}`);
+    let data = await apiJSON(apiUrl(`/photos${q}`));
     let arr  = data.photos || [];
     UploadsState.total = Number(data.total || arr.length || 0);
 
@@ -648,7 +666,7 @@ async function loadUploads(page = UploadsState.page) {
         <td>${size}</td>
         <td>${created}</td>
         <td>${badge}</td>
-        <td><a href="/api/photos/${p.uuid}" target="_blank" rel="noopener">open</a></td>
+        <td><a href="${photoUrl(p.uuid)}" target="_blank" rel="noopener">open</a></td>
       </tr>`;
     }).join("");
 
@@ -660,7 +678,7 @@ async function loadUploads(page = UploadsState.page) {
       r.addEventListener("change", (e) => selectUpload(e.target.value));
     });
     if (UploadsState.page === 1 && arr[0]) selectUpload(arr[0].id);
-  } catch (e) { box && (box.textContent = e.message); }
+  } catch (e) { box && (box.textContent = e.message || "Ошибка загрузки"); }
 }
 async function runCalcForSelected() {
   const id = UploadsState.selectedId;
@@ -668,7 +686,7 @@ async function runCalcForSelected() {
   if (!id) { out && (out.textContent = "Выберите загрузку"); return; }
   out && (out.textContent = "Выполняю расчёт...");
   try {
-    const data = await apiJSON("/api/calc_for_photo", {
+    const data = await apiJSON(apiUrl("/calc_for_photo"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ photo_id: Number(id) })
     });
@@ -680,11 +698,12 @@ async function runCalcForSelected() {
 
     if (data?.preview?.processed_image_url) {
       img.src = data.preview.processed_image_url;
+      img.loading = "lazy"; img.decoding = "async";
       if (thumbs) {
         const singles = (data.preview.single_photos || []).filter(Boolean);
         thumbs.innerHTML = singles.map(u => `
           <a href="${u}" target="_blank" rel="noopener" style="display:block;border:1px solid #eee;border-radius:6px;overflow:hidden">
-            <img src="${u}" alt="bbox" style="width:100%;display:block">
+            <img src="${u}" alt="bbox" style="width:100%;display:block" loading="lazy" decoding="async">
           </a>`).join("");
       }
       show(wrap, true);
@@ -709,7 +728,7 @@ async function exportXlsx() {
   if (!fields.length) { out && (out.textContent = "Выберите хотя бы одно поле"); return; }
   out && (out.textContent = "Готовлю файл...");
   try {
-    const res = await fetch("/api/export_xlsx", {
+    const res = await fetch(apiUrl("/export_xlsx"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fields, filter: { label: onlyHouses ? "house" : null } })
     });

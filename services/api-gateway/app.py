@@ -1,30 +1,51 @@
 import os
 from urllib.parse import urljoin, urlparse, parse_qs
-import requests
-from flask import Flask, request, send_from_directory, Response, jsonify
+from typing import Iterable, Tuple, Dict, Any
 
+import requests
+from flask import Flask, request, send_from_directory, Response, jsonify, stream_with_context
+
+# -----------------------------------------------------------------------------
+# Upstreams (внутрисетевые адреса контейнеров)
+# -----------------------------------------------------------------------------
 AUTH_URL   = os.getenv("AUTH_URL",   "http://auth-service:5000")
-PHOTO_URL  = os.getenv("PHOTO_URL",  "http://photo-service:5002")  # порт photo-service из нового app.py по умолчанию 5002
+PHOTO_URL  = os.getenv("PHOTO_URL",  "http://photo-service:5000")  # photo-service слушает 5000
 COORDS_URL = os.getenv("COORDS_URL", "http://coords-service:5000")
 EXPORT_URL = os.getenv("EXPORT_URL", "http://export-service:5000")
 CALC_URL   = os.getenv("CALC_URL",   "http://calc-service:5000")
 
+# -----------------------------------------------------------------------------
+# Flask
+# -----------------------------------------------------------------------------
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 
+# Заголовки, которые нельзя слать клиенту «как есть» от апстрима
 DROP_HEADERS = {
-    "content-length","transfer-encoding","connection","keep-alive",
-    "proxy-authenticate","proxy-authorization","te","trailer","upgrade",
-    "server","date"
+    "content-length", "transfer-encoding", "connection", "keep-alive",
+    "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
+    "server", "date"
 }
 
-def relay(r: requests.Response) -> Response:
-    """Пробрасываем ответ апстрима с безопасными заголовками."""
-    headers = [(k, v) for k, v in r.headers.items() if k.lower() not in DROP_HEADERS]
-    return Response(r.content, status=r.status_code, headers=headers)
+DEFAULT_TIMEOUT = (5, 60)  # (connect, read)
+
+def _filter_headers(h: Dict[str, str]) -> Iterable[Tuple[str, str]]:
+    return [(k, v) for k, v in h.items() if k.lower() not in DROP_HEADERS]
+
+def _relay_bytes(r: requests.Response) -> Response:
+    """Проксируем небинарный/мелкий ответ (r.content)."""
+    return Response(r.content, status=r.status_code, headers=_filter_headers(r.headers))
+
+def _relay_stream(r: requests.Response) -> Response:
+    """Проксируем бинарный/крупный ответ стримом."""
+    def generate():
+        for chunk in r.iter_content(chunk_size=64 * 1024):
+            if chunk:
+                yield chunk
+    return Response(stream_with_context(generate()), status=r.status_code, headers=_filter_headers(r.headers))
 
 # -----------------------------------------------------------------------------
-# Статика и health
+# Health & статика
 # -----------------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
@@ -49,34 +70,44 @@ def favicon():
 # -----------------------------------------------------------------------------
 @app.post("/api/register")
 def api_register():
-    r = requests.post(urljoin(AUTH_URL, "/register"), json=request.get_json(silent=True) or {})
-    return relay(r)
+    r = requests.post(urljoin(AUTH_URL, "/register"),
+                      json=request.get_json(silent=True) or {},
+                      timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 @app.post("/api/login")
 def api_login():
-    r = requests.post(urljoin(AUTH_URL, "/login"), json=request.get_json(silent=True) or {})
-    return relay(r)
+    r = requests.post(urljoin(AUTH_URL, "/login"),
+                      json=request.get_json(silent=True) or {},
+                      timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 @app.get("/api/users")
 def api_users():
-    r = requests.get(urljoin(AUTH_URL, "/users"), params=request.args)
-    return relay(r)
+    r = requests.get(urljoin(AUTH_URL, "/users"),
+                     params=request.args,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 # -----------------------------------------------------------------------------
 # Photos
 # -----------------------------------------------------------------------------
 @app.get("/api/photos")
 def api_photos():
-    # Прямо проксируем с параметрами (limit/offset/has_coords/date_from/date_to)
-    r = requests.get(urljoin(PHOTO_URL, "/photos"), params=request.args)
-    return relay(r)
+    # NB: проксируем на /photos (без /api)
+    r = requests.get(f"{PHOTO_URL}/photos",
+                     params=request.args,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
-@app.get("/api/photos/<uuid_str>")
-def api_photo_file(uuid_str: str):
-    # Проксирование бинарного файла (из внутренней сети) с сохранением Content-Type
-    upstream = requests.get(urljoin(PHOTO_URL, f"/photos/{uuid_str}"), stream=True)
-    headers = [(k, v) for k, v in upstream.headers.items() if k.lower() not in DROP_HEADERS]
-    return Response(upstream.content, status=upstream.status_code, headers=headers)
+@app.get("/api/photos/<uuid>")
+def api_photo_file(uuid: str):
+    # Стримом — чтобы не буферизовать большие файлы
+    r = requests.get(f"{PHOTO_URL}/photos/{uuid}",
+                     params=None,
+                     stream=True,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_stream(r)
 
 @app.post("/api/upload")
 def api_upload():
@@ -87,11 +118,11 @@ def api_upload():
         "image": (
             request.files["image"].filename,
             request.files["image"].stream,
-            request.files["image"].mimetype
+            request.files["image"].mimetype or "application/octet-stream"
         )
     }
-    meta = request.files.get("meta")
-    if meta and meta.filename:
+    if "meta" in request.files and request.files["meta"].filename:
+        meta = request.files["meta"]
         files["meta"] = (meta.filename, meta.stream, meta.mimetype or "application/json")
 
     data = {}
@@ -100,16 +131,14 @@ def api_upload():
         if v not in (None, ""):
             data[key] = v
 
-    r = requests.post(urljoin(PHOTO_URL, "/upload"), data=data, files=files)
-    return relay(r)
+    r = requests.post(urljoin(PHOTO_URL, "/upload"),
+                      data=data,
+                      files=files,
+                      timeout=(10, 120))
+    return _relay_bytes(r)
 
 @app.post("/api/upload_zip")
 def api_upload_zip():
-    """
-    Массовый импорт в photo-service.
-    Поддерживаем поля: 'archive' ИЛИ 'zip' (оба — ок).
-    Доп. поля: type, subtype, shot_lat, shot_lon.
-    """
     f = request.files.get("archive") or request.files.get("zip")
     if not f:
         return {"error": "no file field 'archive' or 'zip'"}, 400
@@ -128,27 +157,30 @@ def api_upload_zip():
         if v not in (None, ""):
             data[key] = v
 
-    r = requests.post(urljoin(PHOTO_URL, "/upload_zip"), data=data, files=files)
-    return relay(r)
+    r = requests.post(urljoin(PHOTO_URL, "/upload_zip"),
+                      data=data,
+                      files=files,
+                      timeout=(10, 300))
+    return _relay_bytes(r)
 
-# (оставлен для совместимости; сервер может и не иметь /objects)
 @app.get("/api/objects")
 def api_objects():
-    r = requests.get(urljoin(PHOTO_URL, "/objects"), params=request.args)
-    return relay(r)
+    r = requests.get(urljoin(PHOTO_URL, "/objects"),
+                     params=request.args,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 # -----------------------------------------------------------------------------
-# Поиск
+# Search
 # -----------------------------------------------------------------------------
 @app.get("/api/search_address")
 def api_search_addr():
-    """
-    Геокодим адрес в coords-service, затем запрашиваем топ-N ближайших фото.
-    """
     q = request.args.get("q", "")
-    g = requests.post(urljoin(COORDS_URL, "/geocode"), json={"query": q})
+    g = requests.post(urljoin(COORDS_URL, "/geocode"),
+                      json={"query": q},
+                      timeout=DEFAULT_TIMEOUT)
     if g.status_code != 200:
-        return relay(g)
+        return _relay_bytes(g)
 
     latlon = g.json() if g.text else {}
     params = {
@@ -156,34 +188,30 @@ def api_search_addr():
         "lon": latlon.get("lon"),
         "limit": request.args.get("limit", 12),
     }
-    r = requests.get(urljoin(PHOTO_URL, "/search_coords"), params=params)
-    return relay(r)
+    r = requests.get(urljoin(PHOTO_URL, "/search_coords"),
+                     params=params,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 @app.get("/api/search_coords")
 def api_search_coords():
-    # ожидает ?lat=..&lon=..&limit=12
-    r = requests.get(urljoin(PHOTO_URL, "/search_coords"), params=request.args)
-    return relay(r)
+    r = requests.get(urljoin(PHOTO_URL, "/search_coords"),
+                     params=request.args,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
-# (не используется фронтом, оставлен на будущее — может вернуть 404 на photo-service)
 @app.get("/api/search_name")
 def api_search_name():
-    r = requests.get(urljoin(PHOTO_URL, "/search_by_name"), params=request.args)
-    return relay(r)
+    r = requests.get(urljoin(PHOTO_URL, "/search_by_name"),
+                     params=request.args,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_bytes(r)
 
 # -----------------------------------------------------------------------------
-# Calc: основной путь через calc-service + fallback в photo-service
+# Calc
 # -----------------------------------------------------------------------------
 @app.post("/api/calc_for_photo")
 def api_calc_for_photo():
-    """
-    Вход: { "photo_id": 123, "method": 1, "seed": 42 }
-    1) Берём метаданные фото из photo-service.
-    2) Шлём batch в calc-service -> получаем bbox'ы и (опц.) превью.
-    3) Пишем детекции в photo-service (/detect_bulk).
-    4) Возвращаем message + preview (проксированные URL'ы).
-    Fallback: если calc-service недоступен — вызываем photo-service /calc_for_photo.
-    """
     payload = request.get_json(silent=True) or {}
     photo_id = payload.get("photo_id")
     method = int(payload.get("method", 1))
@@ -192,24 +220,25 @@ def api_calc_for_photo():
     if not photo_id:
         return {"error": "photo_id required"}, 400
 
-    # 1) мета фото
-    meta = requests.get(urljoin(PHOTO_URL, "/photo_meta"), params={"id": photo_id})
+    meta = requests.get(urljoin(PHOTO_URL, "/photo_meta"),
+                        params={"id": photo_id},
+                        timeout=DEFAULT_TIMEOUT)
     if meta.status_code != 200:
-        return relay(meta)
+        return _relay_bytes(meta)
     p = meta.json()["photo"]
     uuid = p["uuid"]; shot_lat = p.get("shot_lat"); shot_lon = p.get("shot_lon")
 
-    # 2) image_url для calc-service
     image_url = urljoin(PHOTO_URL, f"/photos/{uuid}")
 
-    # 3) основной путь — calc-service
     try:
         batch_req = {
             "method": method,
             "seed": seed,
             "images": [{"image_url": image_url, "lat": shot_lat, "lon": shot_lon}]
         }
-        r = requests.post(urljoin(CALC_URL, "/detect_batch"), json=batch_req, timeout=120)
+        r = requests.post(urljoin(CALC_URL, "/detect_batch"),
+                          json=batch_req,
+                          timeout=(10, 180))
         if r.status_code != 200:
             raise RuntimeError(f"calc-service status {r.status_code}: {r.text[:256]}")
         calc = r.json()
@@ -220,7 +249,6 @@ def api_calc_for_photo():
         r0 = results[0]
         dets = r0.get("detections") or []
 
-        # 4) запись детекций в БД
         items = []
         for d in dets:
             bbox = d.get("bbox") or {}
@@ -228,16 +256,17 @@ def api_calc_for_photo():
                 "photo_id": photo_id,
                 "label": "house",
                 "confidence": d.get("confidence", 0.0),
-                "bbox": {"x": bbox.get("x",10), "y": bbox.get("y",10),
-                         "w": bbox.get("w",100), "h": bbox.get("h",100)},
+                "bbox": {"x": bbox.get("x", 10), "y": bbox.get("y", 10),
+                         "w": bbox.get("w", 100), "h": bbox.get("h", 100)},
                 "lat": d.get("lat"),
                 "lon": d.get("lon")
             })
-        ins = requests.post(urljoin(PHOTO_URL, "/detect_bulk"), json={"items": items})
+        ins = requests.post(urljoin(PHOTO_URL, "/detect_bulk"),
+                            json={"items": items},
+                            timeout=DEFAULT_TIMEOUT)
         if ins.status_code not in (200, 201):
-            return {"error":"calc ok, but DB insert failed", "details": ins.text}, 500
+            return {"error": "calc ok, but DB insert failed", "details": ins.text}, 500
 
-        # 5) превью — проксируемые URL’ы
         def proxify(u: str) -> str:
             try:
                 parsed = urlparse(u)
@@ -266,26 +295,24 @@ def api_calc_for_photo():
         }, 200
 
     except Exception:
-        # --- Fallback: симуляция в photo-service ---
-        sim = requests.post(urljoin(PHOTO_URL, "/calc_for_photo"), json={"photo_id": photo_id})
+        sim = requests.post(urljoin(PHOTO_URL, "/calc_for_photo"),
+                            json={"photo_id": photo_id},
+                            timeout=DEFAULT_TIMEOUT)
         if sim.status_code != 200:
-            return relay(sim)
-        # совместимость с фронтом: вернём message, превью может отсутствовать
+            return _relay_bytes(sim)
         data = sim.json() if sim.text else {}
         return {
             "message": data.get("message", "Готово"),
-            "preview": {
-                "processed_image_url": None,
-                "single_photos": []
-            }
+            "preview": {"processed_image_url": None, "single_photos": []}
         }, 200
 
 @app.get("/api/calc/photo")
 def api_calc_photo():
-    # Проксируем картинку превью из calc-service по uuid
-    r = requests.get(urljoin(CALC_URL, "/photo"), params=request.args, stream=True)
-    headers = [(k, v) for k, v in r.headers.items() if k.lower() not in DROP_HEADERS]
-    return Response(r.content, status=r.status_code, headers=headers)
+    r = requests.get(urljoin(CALC_URL, "/photo"),
+                     params=request.args,
+                     stream=True,
+                     timeout=DEFAULT_TIMEOUT)
+    return _relay_stream(r)
 
 @app.post("/api/calc_batch")
 def api_calc_batch():
@@ -296,11 +323,12 @@ def api_calc_batch():
     if not ids:
         return {"error": "photo_ids required"}, 400
 
-    # 1) мета
     metas = []
     for pid in ids:
-        m = requests.get(urljoin(PHOTO_URL, "/photo_meta"), params={"id": pid})
-        if m.status_code == 200:
+        m = requests.get(urljoin(PHOTO_URL, "/photo_meta"),
+                         params={"id": pid},
+                         timeout=DEFAULT_TIMEOUT)
+        if m.status_code == 200 and m.text:
             p = m.json()["photo"]
             metas.append({
                 "photo_id": pid,
@@ -309,17 +337,15 @@ def api_calc_batch():
                 "lon": p.get("shot_lon")
             })
 
-    # 2) calc-service
     images = [{"image_url": m["image_url"], "lat": m["lat"], "lon": m["lon"]} for m in metas]
-    r = requests.post(urljoin(CALC_URL, "/detect_batch"), json={"method": method, "seed": seed, "images": images})
+    r = requests.post(urljoin(CALC_URL, "/detect_batch"),
+                      json={"method": method, "seed": seed, "images": images},
+                      timeout=(10, 300))
     if r.status_code != 200:
-        return relay(r)
+        return _relay_bytes(r)
     calc = r.json()
 
-    # 3) маппинг url -> id
     url2id = {m["image_url"]: m["photo_id"] for m in metas}
-
-    # 4) запись в БД
     total = 0
     for res in calc.get("results") or []:
         pid = url2id.get(res.get("original_image_url"))
@@ -332,13 +358,15 @@ def api_calc_batch():
                 "photo_id": pid,
                 "label": "house",
                 "confidence": d.get("confidence", 0.0),
-                "bbox": {"x": bbox.get("x",10), "y": bbox.get("y",10),
-                         "w": bbox.get("w",100), "h": bbox.get("h",100)},
+                "bbox": {"x": bbox.get("x", 10), "y": bbox.get("y", 10),
+                         "w": bbox.get("w", 100), "h": bbox.get("h", 100)},
                 "lat": d.get("lat"),
                 "lon": d.get("lon")
             })
         if items:
-            requests.post(urljoin(PHOTO_URL, "/detect_bulk"), json={"items": items})
+            requests.post(urljoin(PHOTO_URL, "/detect_bulk"),
+                          json={"items": items},
+                          timeout=DEFAULT_TIMEOUT)
             total += len(items)
 
     return {"message": f"Готово. Обработано {len(metas)} фото, найдено {total} объектов."}, 200
@@ -349,10 +377,14 @@ def api_calc_batch():
 @app.post("/api/export_xlsx")
 def api_export_xlsx():
     payload = request.get_json(silent=True) or {}
-    r = requests.post(urljoin(EXPORT_URL, "/export_xlsx"), json=payload)
+    r = requests.post(urljoin(EXPORT_URL, "/export_xlsx"),
+                      json=payload,
+                      timeout=(10, 180))
     if r.status_code == 404:  # backward-compat
-        r = requests.post(urljoin(EXPORT_URL, "/export"), json=payload)
-    return relay(r)
+        r = requests.post(urljoin(EXPORT_URL, "/export"),
+                          json=payload,
+                          timeout=(10, 180))
+    return _relay_bytes(r)
 
 # -----------------------------------------------------------------------------
 # Main

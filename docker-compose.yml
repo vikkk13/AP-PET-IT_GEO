@@ -61,6 +61,12 @@ services:
       - ./install:/app/install:ro
     ports:
       - "${PHOTO_PORT:-5002}:5000"
+    networks:
+      default:
+        aliases:
+          - photo-service    # с дефисом
+          - photo_service    # с подчёркиванием
+
 
   coords-service:
     build: ./services/coords-service
@@ -121,7 +127,7 @@ services:
       - export-service
     environment:
       AUTH_URL:   "http://auth-service:5000"
-      PHOTO_URL:  "http://photo-service:5000"
+      PHOTO_URL:  http://photo-service:5000
       COORDS_URL: "http://coords-service:5000"
       CALC_URL:   "http://calc-service:5000"
       EXPORT_URL: "http://export-service:5000"
