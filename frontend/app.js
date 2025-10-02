@@ -440,87 +440,130 @@ async function loadUsers() {
   }
 }
 
-/* ---------------- Map + поиски --------------------------- */
+/* ---------------- Map + поиски (fixed) ------------------- */
 let _leafletMap = null;
 let _leafletMarkers = [];
+
 function ensureMap() {
   if (_leafletMap) return _leafletMap;
-  _leafletMap = L.map("map", { attributionControl:false });
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution:"" }).addTo(_leafletMap);
-  L.control.attribution({ prefix:false }).addAttribution("© OpenStreetMap contributors").addTo(_leafletMap);
+  const el = document.getElementById("map");
+  if (!el) return null;
+  _leafletMap = L.map(el, { attributionControl: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "" })
+    .addTo(_leafletMap);
+  L.control.attribution({ prefix: false })
+    .addAttribution("© OpenStreetMap contributors")
+    .addTo(_leafletMap);
   _leafletMap.setView([55.751244, 37.618423], 11);
   return _leafletMap;
 }
-function clearMarkers() { _leafletMarkers.forEach(m => m.remove()); _leafletMarkers = []; }
+
+function clearMarkers() {
+  _leafletMarkers.forEach(m => m.remove());
+  _leafletMarkers = [];
+}
+
 function addMarker(lat, lon, html) {
-  const marker = L.marker([lat, lon]).addTo(_leafletMap);
+  const map = ensureMap();
+  if (!map) return null;
+  const marker = L.marker([lat, lon]).addTo(map);
   if (html) marker.bindPopup(html);
   _leafletMarkers.push(marker);
   return marker;
 }
+
 function showMap(on) {
-  show("#map", on);
-  if (on) setTimeout(() => ensureMap().invalidateSize(), 0);
+  const el = document.getElementById("map");
+  if (!el) return;
+  el.style.display = on ? "" : "none";
+  if (on) {
+    const map = ensureMap();
+    if (map) setTimeout(() => map.invalidateSize(), 0);
+  }
 }
 
 async function searchAddress() {
   const q = val("#addr");
-  const outJson = $("#search_out"); const grid = $("#search_results");
-  setText(outJson, "..."); setText("#search_meta", "");
+  const outJson = $("#search_out");
+  const grid = $("#search_results");
+
+  setText(outJson, "...");
+  setText("#search_meta", "");
   if (grid) { grid.innerHTML = ""; show("#search_results", false); }
   showMap(false);
+
   try {
     const data = await apiJSON(apiUrl(`/search_address?q=${encodeURIComponent(q)}`));
     outJson && (outJson.textContent = JSON.stringify(data, null, 2));
+
     const results = Array.isArray(data.results) ? data.results : [];
     const hasAddr = (data.lat != null && data.lon != null);
+
     if (hasAddr || results.length) {
+      // 1) Показать и создать карту
+      showMap(true);
+      const map = ensureMap();
+      if (map) map.invalidateSize();
+
+      // 2) Маркеры
       clearMarkers();
       if (hasAddr) {
         const lat = +data.lat, lon = +data.lon;
         setText("#search_meta", `Координаты адреса: ${lat.toFixed(6)}, ${lon.toFixed(6)}. Найдено фото: ${results.length}`);
         addMarker(lat, lon, `<b>Адрес</b><br>${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-        ensureMap().setView([lat, lon], 15);
-      } else setText("#search_meta", `Найдено фото: ${results.length}`);
-      showMap(true);
-    }
-    if (results.length && grid) {
-      results.forEach((r) => {
-        if (r.shot_lat != null && r.shot_lon != null) {
+        map && map.setView([lat, lon], 15);
+      } else {
+        setText("#search_meta", `Найдено фото: ${results.length}`);
+      }
+
+      // 3) Точки фото
+      if (results.length && grid) {
+        results.forEach((r) => {
+          if (r.shot_lat != null && r.shot_lon != null) {
+            const href = photoUrl(r.uuid);
+            const title = `${r.name || r.uuid}`;
+            const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
+            const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
+            addMarker(+r.shot_lat, +r.shot_lon,
+              `<div style="max-width:220px">
+                 <div class="ellipsis" title="${title}"><b>${title}</b></div>
+                 <div>${dist}${dist && ll ? " · " : ""}${ll}</div>
+                 <div style="margin-top:6px"><a href="${href}" target="_blank" rel="noopener">open</a></div>
+               </div>`);
+          }
+        });
+
+        grid.innerHTML = results.map((r) => {
           const href = photoUrl(r.uuid);
           const title = `${r.name || r.uuid}`;
           const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
-          const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
-          addMarker(+r.shot_lat, +r.shot_lon,
-            `<div style="max-width:220px">
-               <div class="ellipsis" title="${title}"><b>${title}</b></div>
-               <div>${dist}${dist && ll ? " · " : ""}${ll}</div>
-               <div style="margin-top:6px"><a href="${href}" target="_blank" rel="noopener">open</a></div>
-             </div>`);
-        }
-      });
-      grid.innerHTML = results.map((r) => {
-        const href = photoUrl(r.uuid);
-        const title = `${r.name || r.uuid}`;
-        const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
-        const ll = (r.shot_lat != null && r.shot_lon != null) ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}` : "";
-        return `
-          <div class="card-photo">
-            <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
-              <img src="${href}" alt="${title}" loading="lazy" decoding="async">
-            </a>
-            <div class="meta">
-              <div class="ellipsis" title="${title}">${title}</div>
-              <div style="color:#666;">${dist}${dist && ll ? " · " : ""}${ll}</div>
-              <div><a href="${href}" target="_blank" rel="noopener">open</a></div>
-            </div>
-          </div>`;
-      }).join("");
-      show("#search_results", true);
-    } else show("#search_results", false);
+          const ll = (r.shot_lat != null && r.shot_lon != null)
+            ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`
+            : "";
+          return `
+            <div class="card-photo">
+              <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
+                <img src="${href}" alt="${title}" loading="lazy" decoding="async">
+              </a>
+              <div class="meta">
+                <div class="ellipsis" title="${title}">${title}</div>
+                <div style="color:#666;">${dist}${dist && ll ? " · " : ""}${ll}</div>
+                <div><a href="${href}" target="_blank" rel="noopener">open</a></div>
+              </div>
+            </div>`;
+        }).join("");
+        show("#search_results", true);
+      } else {
+        show("#search_results", false);
+      }
+    } else {
+      showMap(false);
+      show("#search_results", false);
+    }
   } catch (e) {
     outJson && (outJson.textContent = e.message);
-    showMap(false); show("#search_results", false);
+    showMap(false);
+    show("#search_results", false);
   }
 }
 
@@ -528,54 +571,82 @@ async function searchCoords() {
   const lat = parseFloat(val("#coord_lat"));
   const lon = parseFloat(val("#coord_lon"));
   const limit = parseInt(val("#coord_limit") || "12", 10);
-  const meta = $("#coords_meta"); const grid = $("#coords_results");
-  setText(meta, ""); if (grid) { grid.innerHTML = ""; show("#coords_results", false); }
+  const meta = $("#coords_meta");
+  const grid = $("#coords_results");
+
+  setText(meta, "");
+  if (grid) { grid.innerHTML = ""; show("#coords_results", false); }
   showMap(false);
-  if (Number.isNaN(lat) || Number.isNaN(lon)) { setText(meta, "Укажи корректные lat/lon"); return; }
+
+  if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    setText(meta, "Укажи корректные lat/lon");
+    return;
+  }
+
   try {
     const data = await apiJSON(apiUrl(`/search_coords?lat=${lat}&lon=${lon}&limit=${limit}`));
     const results = Array.isArray(data.results) ? data.results : [];
     setText(meta, `Найдено: ${results.length} (топ-${limit} ближайших)`);
+
     if (results.length) {
-      clearMarkers(); addMarker(lat, lon, `<b>Центр</b><br>${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-      ensureMap().setView([lat, lon], 15); showMap(true);
-    }
-    if (results.length && grid) {
-      results.forEach((r) => {
-        if (r.shot_lat != null && r.shot_lon != null) {
+      // 1) Показать и создать карту
+      showMap(true);
+      const map = ensureMap();
+      if (map) map.invalidateSize();
+
+      // 2) Маркеры
+      clearMarkers();
+      addMarker(lat, lon, `<b>Центр</b><br>${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+      map && map.setView([lat, lon], 15);
+
+      // 3) Точки фото
+      if (grid) {
+        results.forEach((r) => {
+          if (r.shot_lat != null && r.shot_lon != null) {
+            const href = photoUrl(r.uuid);
+            const title = `${r.name || r.uuid}`;
+            const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
+            const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
+            addMarker(+r.shot_lat, +r.shot_lon,
+              `<div style="max-width:220px">
+                 <div class="ellipsis" title="${title}"><b>${title}</b></div>
+                 <div>${dist}${dist && ll ? " · " : ""}${ll}</div>
+                 <div style="margin-top:6px"><a href="${href}" target="_blank" rel="noopener">open</a></div>
+               </div>`);
+          }
+        });
+
+        grid.innerHTML = results.map((r) => {
           const href = photoUrl(r.uuid);
           const title = `${r.name || r.uuid}`;
           const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
-          const ll = `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`;
-          addMarker(+r.shot_lat, +r.shot_lon,
-            `<div style="max-width:220px">
-               <div class="ellipsis" title="${title}"><b>${title}</b></div>
-               <div>${dist}${dist && ll ? " · " : ""}${ll}</div>
-               <div style="margin-top:6px"><a href="${href}" target="_blank" rel="noopener">open</a></div>
-             </div>`);
-        }
-      });
-      grid.innerHTML = results.map((r) => {
-        const href = photoUrl(r.uuid);
-        const title = `${r.name || r.uuid}`;
-        const dist = r.dist_m != null ? `${r.dist_m.toFixed(1)} м` : "";
-        const ll = (r.shot_lat != null && r.shot_lon != null) ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}` : "";
-        return `
-          <div class="card-photo">
-            <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
-              <img src="${href}" alt="${title}" loading="lazy" decoding="async">
-            </a>
-            <div class="meta">
-              <div class="ellipsis" title="${title}">${title}</div>
-              <div style="color:#666;">${dist}${dist && ll ? " · " : ""}${ll}</div>
-              <div><a href="${href}" target="_blank" rel="noopener">open</a></div>
-            </div>
-          </div>`;
-      }).join("");
-      show("#coords_results", true);
-    } else show("#coords_results", false);
+          const ll = (r.shot_lat != null && r.shot_lon != null)
+            ? `${(+r.shot_lat).toFixed(6)}, ${(+r.shot_lon).toFixed(6)}`
+            : "";
+          return `
+            <div class="card-photo">
+              <a class="thumb" href="${href}" target="_blank" rel="noopener" title="${title}">
+                <img src="${href}" alt="${title}" loading="lazy" decoding="async">
+              </a>
+              <div class="meta">
+                <div class="ellipsis" title="${title}">${title}</div>
+                <div style="color:#666;">${dist}${dist && ll ? " · " : ""}${ll}</div>
+                <div><a href="${href}" target="_blank" rel="noopener">open</a></div>
+              </div>
+            </div>`;
+        }).join("");
+        show("#coords_results", true);
+      } else {
+        show("#coords_results", false);
+      }
+    } else {
+      showMap(false);
+      show("#coords_results", false);
+    }
   } catch (e) {
-    setText(meta, e.message); showMap(false); show("#coords_results", false);
+    setText(meta, e.message);
+    showMap(false);
+    show("#coords_results", false);
   }
 }
 
