@@ -88,6 +88,7 @@ services:
       BASE_URL: "http://calc-service:5000"  # для корректных URL превью внутри сети Docker
     ports:
       - "${CALC_PORT:-5004}:5000"
+      - "8804:8888" # для проверочного запуска JupyterLab на этапе разработки
 
   export-service:
     build: ./services/export-service
