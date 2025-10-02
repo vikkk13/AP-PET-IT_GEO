@@ -1,11 +1,17 @@
-from flask import Flask, request, jsonify, send_file
-import logging
-import random
-import math
 import io
+import logging
+import math
 import os
+import random
 import uuid
+
+import cv2
+import numpy as np
+import torch
+from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
+
 import requests
+from flask import Flask, request, jsonify, send_file
 from PIL import Image, ImageDraw, ImageFont
 
 # Настройка логирования
@@ -21,6 +27,143 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Глобальные настройки
 BASE_URL = "http://localhost:5004"
+
+class AdvancedUrbanSegmentator:
+    def __init__(self, model_name="shi-labs/oneformer_ade20k_swin_tiny", cache_dir=None):
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        
+        local_model_path = self._get_local_model_path()
+        
+        if local_model_path and os.path.exists(local_model_path):
+            self.processor = OneFormerProcessor.from_pretrained(local_model_path)
+            self.model = OneFormerForUniversalSegmentation.from_pretrained(local_model_path)
+        else:
+            self.processor = OneFormerProcessor.from_pretrained(model_name, cache_dir=cache_dir)
+            self.model = OneFormerForUniversalSegmentation.from_pretrained(model_name, cache_dir=cache_dir)
+            
+            if cache_dir and local_model_path:
+                self.processor.save_pretrained(local_model_path)
+                self.model.save_pretrained(local_model_path)
+        
+        self.class_names = self.model.config.id2label
+        self.building_class_ids = self._find_building_class_ids()
+    
+    def _get_local_model_path(self):
+        if not self.cache_dir:
+            return None
+        safe_name = self.model_name.replace("/", "_") if "/" in self.model_name else self.model_name
+        return os.path.join(self.cache_dir, safe_name)
+    
+    def _find_building_class_ids(self):
+        building_keywords = ['building', 'house', 'skyscraper', 'edifice', 'tower']
+        building_ids = []
+        for class_id, class_name in self.class_names.items():
+            if any(keyword in class_name.lower() for keyword in building_keywords):
+                building_ids.append(class_id)
+        return building_ids or [1, 25, 48, 84]
+    
+    def semantic_segmentation_detailed(self, image, min_area=500, building_confidence=0.6):
+        if isinstance(image, str):
+            image = Image.open(image).convert('RGB')
+        elif isinstance(image, np.ndarray):
+            image = Image.fromarray(image).convert('RGB')
+        else:
+            image = image.convert('RGB')
+        
+        inputs = self.processor(images=image, task_inputs=["semantic"], return_tensors="pt")
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        semantic_map = self.processor.post_process_semantic_segmentation(
+            outputs, target_sizes=[image.size[::-1]]
+        )[0]
+        
+        semantic_map_np = semantic_map.cpu().numpy()
+        
+        building_mask = np.zeros_like(semantic_map_np, dtype=np.uint8)
+        
+        for class_id in self.building_class_ids:
+            building_mask[semantic_map_np == class_id] = 1
+        
+        building_mask_refined = self._refine_mask_soft(building_mask)
+        buildings_dict = self._extract_components_soft(building_mask_refined, min_area, "building", 
+                                                     semantic_map_np, building_confidence)
+        
+        return {"buildings": buildings_dict}
+    
+    def _refine_mask_soft(self, mask):
+        if np.sum(mask) == 0:
+            return mask
+        
+        kernel_small = np.ones((2, 2), np.uint8)
+        cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
+        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel_small)
+        
+        return cleaned_mask
+    
+    def _extract_components_soft(self, mask, min_area, object_type, semantic_map, min_confidence=0.3):
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        
+        objects_dict = {}
+        
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            
+            if area >= min_area:
+                component_mask = (labels == i).astype(np.uint8)
+                
+                component_pixels = semantic_map[component_mask > 0]
+                if len(component_pixels) > 0:
+                    unique_classes, counts = np.unique(component_pixels, return_counts=True)
+                    dominant_class = unique_classes[np.argmax(counts)]
+                    class_name = self.class_names.get(dominant_class, f"Class {dominant_class}")
+                    confidence = counts.max() / len(component_pixels)
+                    
+                    if confidence >= min_confidence:
+                        bbox, area, centroid = self._analyze_mask(component_mask)
+                        
+                        objects_dict[i] = {
+                            "mask": component_mask,
+                            "class_id": int(dominant_class),
+                            "class_name": class_name,
+                            "confidence": float(confidence),
+                            "bbox": bbox,
+                            "area": area,
+                            "centroid": centroid,
+                            "object_id": i,
+                            "type": object_type,
+                            "pixel_count": int(area)
+                        }
+                else:
+                    bbox, area, centroid = self._analyze_mask(component_mask)
+                    dominant_class = 1
+                    
+                    objects_dict[i] = {
+                        "mask": component_mask,
+                        "class_id": int(dominant_class),
+                        "class_name": object_type,
+                        "confidence": 1.0,
+                        "bbox": bbox,
+                        "area": area,
+                        "centroid": centroid,
+                        "object_id": i,
+                        "type": object_type,
+                        "pixel_count": int(area)
+                    }
+        
+        return objects_dict
+    
+    def _analyze_mask(self, mask):
+        y_indices, x_indices = np.where(mask > 0)
+        if len(y_indices) == 0 or len(x_indices) == 0:
+            return [0, 0, 0, 0], 0, [0, 0]
+        x_min, x_max = np.min(x_indices), np.max(x_indices)
+        y_min, y_max = np.min(y_indices), np.max(y_indices)
+        area = len(y_indices)
+        centroid = [np.mean(x_indices), np.mean(y_indices)]
+        return [x_min, y_min, x_max, y_max], area, centroid
 
 def download_image(image_url):
     """Загружает изображение по URL"""
@@ -47,7 +190,7 @@ def generate_offset_coordinates(lat, lon, offset=50):
     
 def detect_objects(image_url, lat, lon, method, seed):
     """
-    Имитирует поиск объектов и возвращает список обнаружений
+    Выполняет реальную детекцию зданий используя семантическую сегментацию с разными моделями
     
     Args:
         image_url: URL изображения
@@ -60,51 +203,159 @@ def detect_objects(image_url, lat, lon, method, seed):
         list: список обнаружений [id, method, bbox, confidence, lat, lon]
     """
     try:
-        # Загружаем изображение для получения размеров
+        # Загружаем изображение
         image = download_image(image_url)
-        width, height = image.size
-        
-        # Устанавливаем seed
-        if seed:
-            random.seed(int(seed))
         
         # Если method=0 - автоподбор лучшего алгоритма
         if method == 0:
-            used_method = random.randint(1, 6)
-        else:
-            used_method = method
+            return _auto_select_best_model(image, lat, lon, seed)
         
-        # Генерируем случайные bbox в формате x,y,w,h
-        num_detections = random.randint(1, 5)
-        detections = []
+        # Определяем модель на основе method
+        model_config = _get_model_config(method)
+        used_method = model_config["method"]
+        model_name = model_config["model_name"]
         
-        for i in range(num_detections):
-            w = random.randint(int(width * 0.1), int(width * 0.4))  # ширина
-            h = random.randint(int(height * 0.1), int(height * 0.3))  # высота
-            x = random.randint(10, width - w - 10)  # левый верхний угол x
-            y = random.randint(10, height - h - 10)  # левый верхний угол y
-            
-            # Генерируем координаты объекта
-            obj_lat, obj_lon = generate_offset_coordinates(lat, lon, random.randint(50, 100))
-            
-            # Генерируем confidence
-            confidence = round(random.uniform(0.5, 0.999), 3)
-            
-            detection = [
-                f'id{i+1}',           # id
-                used_method,           # method
-                {'x': x, 'y': y, 'w': w, 'h': h},  # bbox в формате x,y,w,h
-                confidence,            # confidence
-                obj_lat,               # lat объекта
-                obj_lon                # lon объекта
-            ]
-            detections.append(detection)
+        # Инициализируем сегментатор с выбранной моделью
+        cache_dir = "./model_cache"
+        os.makedirs(cache_dir, exist_ok=True)
         
+        segmentator = AdvancedUrbanSegmentator(
+            model_name=model_name,
+            cache_dir=cache_dir
+        )
+        
+        # Выполняем реальную семантическую сегментацию
+        results = segmentator.semantic_segmentation_detailed(
+            image, 
+            min_area=500,
+            building_confidence=0.6
+        )
+        
+        # Преобразуем результаты в требуемый формат (ТОЛЬКО ЗДАНИЯ)
+        detections = _format_detections(results["buildings"], used_method, lat, lon, image.size)
+        
+        logger.info(f"Детекция моделью {model_name}: найдено {len(detections)} зданий")
         return detections
         
     except Exception as e:
-        logger.error(f"Error in detect_objects: {e}")
+        logger.error(f"Ошибка детекции: {e}")
         return []
+
+def _auto_select_best_model(image, lat, lon, seed):
+    """Запускает все модели и выбирает ту, которая нашла больше всего зданий"""
+    logger.info("Автоподбор модели: запуск всех моделей...")
+    
+    cache_dir = "./model_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    models_to_test = [1, 2, 3, 4, 5]
+    best_detections = []
+    best_model_method = 1
+    best_model_name = "shi-labs/oneformer_ade20k_swin_tiny"
+    max_buildings = 0
+    
+    for model_method in models_to_test:
+        try:
+            model_config = _get_model_config(model_method)
+            model_name = model_config["model_name"]
+            
+            logger.info(f"Тестируем модель {model_method}: {model_name}")
+            
+            segmentator = AdvancedUrbanSegmentator(
+                model_name=model_name,
+                cache_dir=cache_dir
+            )
+            
+            results = segmentator.semantic_segmentation_detailed(
+                image, 
+                min_area=500,
+                building_confidence=0.6
+            )
+            
+            buildings_count = len(results["buildings"])
+            logger.info(f"  Модель {model_method} нашла {buildings_count} зданий")
+            
+            if buildings_count > max_buildings:
+                max_buildings = buildings_count
+                best_model_method = model_method
+                best_model_name = model_name
+                best_detections = _format_detections(
+                    results["buildings"], model_method, lat, lon, image.size
+                )
+                
+        except Exception as e:
+            logger.error(f"  Ошибка в модели {model_method}: {e}")
+            continue
+    
+    logger.info(f"Выбрана модель {best_model_method} ({best_model_name}): {max_buildings} зданий")
+    return best_detections
+
+def _format_detections(buildings_dict, method, lat, lon, image_size):
+    """Форматирует обнаружения зданий в требуемый формат"""
+    detections = []
+    
+    for obj_id, building in buildings_dict.items():
+        bbox_dict = _convert_bbox_format(building["bbox"])
+        obj_lat, obj_lon = _calculate_object_coordinates(
+            lat, lon, building["centroid"], image_size, building["area"]
+        )
+        
+        detection = [
+            f'building_{obj_id}',
+            method,
+            bbox_dict,
+            round(building["confidence"], 3),
+            obj_lat,
+            obj_lon
+        ]
+        detections.append(detection)
+    
+    return detections
+
+def _get_model_config(method):
+    """Возвращает конфигурацию модели на основе method"""
+    models = {
+        1: {"method": 1, "model_name": "shi-labs/oneformer_ade20k_swin_tiny", "description": "Tiny модель"},
+        2: {"method": 2, "model_name": "shi-labs/oneformer_ade20k_swin_base", "description": "Small модель"},
+        3: {"method": 3, "model_name": "shi-labs/oneformer_coco_swin_large", "description": "COCO модель"},
+        4: {"method": 4, "model_name": "shi-labs/oneformer_ade20k_swin_large", "description": "ADE20K модель"},
+        5: {"method": 5, "model_name": "shi-labs/oneformer_cityscapes_swin_large", "description": "Cityscapes модель"}
+    }
+    
+    return models.get(method, models[1])
+
+def _convert_bbox_format(bbox):
+    """Конвертирует bbox из [x_min, y_min, x_max, y_max] в {x, y, w, h}"""
+    x_min, y_min, x_max, y_max = bbox
+    return {
+        'x': int(x_min),
+        'y': int(y_min), 
+        'w': int(x_max - x_min),
+        'h': int(y_max - y_min)
+    }
+
+def _calculate_object_coordinates(center_lat, center_lon, centroid, image_size, area):
+    """Рассчитывает координаты объекта на основе его положения в изображении"""
+    centroid_x, centroid_y = centroid
+    img_width, img_height = image_size
+    
+    if center_lat is None or center_lon is None:
+        return None, None
+    
+    # Нормализуем позицию относительно центра изображения
+    norm_x = (centroid_x - img_width/2) / img_width
+    norm_y = (centroid_y - img_height/2) / img_height
+    
+    # Масштабируем смещение в зависимости от площади объекта
+    area_factor = min(area / 10000, 1.0)
+    
+    # Рассчитываем смещение в градусах
+    offset_deg = 0.001 * area_factor
+    
+    obj_lat = float(center_lat) + norm_y * offset_deg
+    obj_lon = float(center_lon) + norm_x * offset_deg
+    
+    return round(obj_lat, 6), round(obj_lon, 6)
     
 def draw_detections(image_url, detections, method, seed, single_detection_index=None):
     """

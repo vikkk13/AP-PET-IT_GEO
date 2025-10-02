@@ -1,3 +1,53 @@
+# Основные библиотеки
+numpy==2.3.2
+pandas==2.3.2
+scipy==1.16.2
+openpyxl==3.1.5
+
+# Визуализация
+matplotlib==3.10.6
+seaborn==0.13.2
+
+# Jupyter
+anywidget==0.9.18
+jupyterlab==4.4.9
+jupyterlab-execute-time==3.2.0
+
+# Веб-интерфейсы
+folium==0.20.0
+gradio==5.47.2
+gradio_imageslider==0.0.20
+pydeck==0.9.1
+streamlit==1.50.0
+streamlit-folium==0.25.2
+
+# ML/DL
+accelerate==1.10.1
+catboost==1.2.8
+diffusers==0.35.1
+einops==0.8.1
+huggingface_hub
+scikit-learn==1.7.2
+timm==1.0.20
+transformers==4.56.2
+ultralytics==8.3.203
+xgboost==3.0.5
+
+# Компьютерное зрение
+kornia==0.8.1
+opencv-python==4.12.0.88
+scikit-image==0.25.2
+
+# Геоданные
+geojson==3.2.0
+osmium==4.1.1
+pyproj==3.7.2
+pyrosm==0.6.2
+shapely==2.1.2
+geopandas==1.1.1
+mapclassify==2.10.0
+osmnx==2.0.6
+
+# Прочее
+pytest==8.4.2
 flask==2.3.3
-Pillow==10.0.0
-requests==2.31.0
