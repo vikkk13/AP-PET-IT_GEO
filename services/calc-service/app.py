@@ -48,6 +48,7 @@ class AdvancedUrbanSegmentator:
         
         self.class_names = self.model.config.id2label
         self.building_class_ids = self._find_building_class_ids()
+        self.road_class_ids = self._find_road_class_ids()
     
     def _get_local_model_path(self):
         if not self.cache_dir:
@@ -62,6 +63,14 @@ class AdvancedUrbanSegmentator:
             if any(keyword in class_name.lower() for keyword in building_keywords):
                 building_ids.append(class_id)
         return building_ids or [1, 25, 48, 84]
+    
+    def _find_road_class_ids(self):
+        road_keywords = ['road', 'street', 'highway', 'pavement', 'roadway', 'lane']
+        road_ids = []
+        for class_id, class_name in self.class_names.items():
+            if any(keyword in class_name.lower() for keyword in road_keywords):
+                road_ids.append(class_id)
+        return road_ids or [11, 12, 13]
     
     def semantic_segmentation_detailed(self, image, min_area=500, building_confidence=0.6):
         if isinstance(image, str):
@@ -82,24 +91,46 @@ class AdvancedUrbanSegmentator:
         
         semantic_map_np = semantic_map.cpu().numpy()
         
+        # Создаем маски для разных типов объектов
         building_mask = np.zeros_like(semantic_map_np, dtype=np.uint8)
+        road_mask = np.zeros_like(semantic_map_np, dtype=np.uint8)
+        other_mask = np.zeros_like(semantic_map_np, dtype=np.uint8)
         
+        # Заполняем маску зданий
         for class_id in self.building_class_ids:
             building_mask[semantic_map_np == class_id] = 1
         
+        # Заполняем маску дорог
+        for class_id in self.road_class_ids:
+            road_mask[semantic_map_np == class_id] = 1
+        
+        # Маска для всех остальных объектов (кроме фона)
+        background_class = 0  # обычно 0 - это фон
+        for class_id in range(1, len(self.class_names)):  # начинаем с 1, чтобы исключить фон
+            if class_id not in self.building_class_ids and class_id not in self.road_class_ids:
+                other_mask[semantic_map_np == class_id] = 1
+        
         building_mask_refined = self._refine_mask_soft(building_mask)
+        road_mask_refined = self._refine_mask_soft(road_mask)
+        other_mask_refined = self._refine_mask_soft(other_mask)
+        
         buildings_dict = self._extract_components_soft(building_mask_refined, min_area, "building", 
                                                      semantic_map_np, building_confidence)
         
-        return {"buildings": buildings_dict}
+        return {
+            "buildings": buildings_dict,
+            "road_mask": road_mask_refined,
+            "other_mask": other_mask_refined,
+            "semantic_map": semantic_map_np
+        }
     
     def _refine_mask_soft(self, mask):
         if np.sum(mask) == 0:
             return mask
         
-        kernel_small = np.ones((2, 2), np.uint8)
-        cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
-        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel_small)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
         
         return cleaned_mask
     
@@ -182,7 +213,7 @@ def download_image(image_url):
 
 def generate_offset_coordinates(lat, lon, offset=50):
     """Генерирует случайные координаты в радиусе от указанной точки"""
-    if not lat or not lon: return None, None
+    if not lat and not lon: return None, None
     lat, lon = float(lat), float(lon)
     a, d = random.uniform(0, 2 * math.pi), random.uniform(0, offset ** 2) ** 0.5
     return (lat + d * math.cos(a) / 111000, 
@@ -234,12 +265,16 @@ def detect_objects(image_url, lat, lon, method, seed):
         # Преобразуем результаты в требуемый формат (ТОЛЬКО ЗДАНИЯ)
         detections = _format_detections(results["buildings"], used_method, lat, lon, image.size)
         
+        # Сохраняем маски для использования в отрисовке
+        results["detections"] = detections
+        results["image_size"] = image.size
+        
         logger.info(f"Детекция моделью {model_name}: найдено {len(detections)} зданий")
-        return detections
+        return results
         
     except Exception as e:
         logger.error(f"Ошибка детекции: {e}")
-        return []
+        return {"buildings": {}, "detections": [], "road_mask": None, "other_mask": None}
 
 def _auto_select_best_model(image, lat, lon, seed):
     """Запускает все модели и выбирает ту, которая нашла больше всего зданий"""
@@ -249,7 +284,7 @@ def _auto_select_best_model(image, lat, lon, seed):
     os.makedirs(cache_dir, exist_ok=True)
     
     models_to_test = [1, 2, 3, 4, 5]
-    best_detections = []
+    best_results = None
     best_model_method = 1
     best_model_name = "shi-labs/oneformer_ade20k_swin_tiny"
     max_buildings = 0
@@ -279,16 +314,18 @@ def _auto_select_best_model(image, lat, lon, seed):
                 max_buildings = buildings_count
                 best_model_method = model_method
                 best_model_name = model_name
-                best_detections = _format_detections(
+                best_results = results
+                best_results["detections"] = _format_detections(
                     results["buildings"], model_method, lat, lon, image.size
                 )
+                best_results["image_size"] = image.size
                 
         except Exception as e:
             logger.error(f"  Ошибка в модели {model_method}: {e}")
             continue
     
     logger.info(f"Выбрана модель {best_model_method} ({best_model_name}): {max_buildings} зданий")
-    return best_detections
+    return best_results if best_results else {"buildings": {}, "detections": [], "road_mask": None, "other_mask": None}
 
 def _format_detections(buildings_dict, method, lat, lon, image_size):
     """Форматирует обнаружения зданий в требуемый формат"""
@@ -301,7 +338,7 @@ def _format_detections(buildings_dict, method, lat, lon, image_size):
         )
         
         detection = [
-            f'building_{obj_id}',
+            f'id{obj_id}',
             method,
             bbox_dict,
             round(building["confidence"], 3),
@@ -356,8 +393,32 @@ def _calculate_object_coordinates(center_lat, center_lon, centroid, image_size, 
     obj_lon = float(center_lon) + norm_x * offset_deg
     
     return round(obj_lat, 6), round(obj_lon, 6)
+
+def apply_masks(image, road_mask, other_mask):
+    """Накладывает маски на изображение"""
+    if image.mode != 'RGBA':
+        image = image.convert('RGBA')
     
-def draw_detections(image_url, detections, method, seed, single_detection_index=None):
+    # Создаем изображение для масок
+    mask_overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    
+    if road_mask is not None and np.sum(road_mask) > 0:
+        # Синяя маска для дорог (альфа = 90)
+        road_mask_img = Image.fromarray((road_mask * 255).astype(np.uint8), mode='L')
+        red_overlay = Image.new('RGBA', image.size, (0, 0, 255, 90))
+        mask_overlay = Image.composite(red_overlay, mask_overlay, road_mask_img)
+    
+    if other_mask is not None and np.sum(other_mask) > 0:
+        # Осветляющая маска для остальных объектов (альфа = 250)
+        other_mask_img = Image.fromarray((other_mask * 255).astype(np.uint8), mode='L')
+        gray_overlay = Image.new('RGBA', image.size, (255, 255, 255, 192))
+        mask_overlay = Image.composite(gray_overlay, mask_overlay, other_mask_img)
+    
+    # Накладываем маски на исходное изображение
+    result = Image.alpha_composite(image, mask_overlay)
+    return result
+    
+def draw_detections(image_url, detections, method, seed, single_detection_index=None, road_mask=None, other_mask=None):
     """
     Отрисовывает обнаружения на изображении
     
@@ -367,6 +428,8 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
         method: метод детекции
         seed: seed
         single_detection_index: индекс одиночного bbox (None - все bbox)
+        road_mask: маска дорог
+        other_mask: маска других объектов
     
     Returns:
         tuple: (img_buffer, photo_urls)
@@ -390,13 +453,17 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
         image = download_image(image_url)
         width, height = image.size
         
+        # Накладываем маски если они предоставлены
+        if road_mask is not None or other_mask is not None:
+            image = apply_masks(image, road_mask, other_mask)
+        
         # Создаем контекст для рисования
         draw = ImageDraw.Draw(image)
         
         # Шрифт
         font = None
         try:
-            font = ImageFont.truetype("arial.ttf", 10)
+            font = ImageFont.truetype("arial.ttf", 11)
         except:
             try:
                 font = ImageFont.load_default()
@@ -422,9 +489,9 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
                 x2 = bbox['x'] + bbox['w']
                 y2 = bbox['y'] + bbox['h']
                 
-                # Рисуем bbox (тоньше - width=1)
+                # Рисуем bbox (УВЕЛИЧИЛ толщину рамки с 1 до 3)
                 draw.rectangle([x1, y1, x2, y2], 
-                             outline=color, width=1)
+                             outline=color, width=3)  # Было width=1
                 
                 # Подписываем bbox с confidence (формат: "id1 .87")
                 label = f"{id_val} .{int(confidence * 100):02d}"
@@ -441,8 +508,8 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
                 
                 # Координаты объекта
                 if obj_lat and obj_lon:
-                    coord_text1 = f"{obj_lat:.6f}"
-                    coord_text2 = f"{obj_lon:.6f}"
+                    coord_text1 = f"{obj_lat:.5f}"
+                    coord_text2 = f"{obj_lon:.5f}"
                     
                     coord_bg_x = x1 + 1
                     coord_bg_y = y1 + label_bg_height + 1
@@ -485,9 +552,9 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
                 x2 = bbox['x'] + bbox['w']
                 y2 = bbox['y'] + bbox['h']
                 
-                # Рисуем bbox (тоньше - width=2)
+                # Рисуем bbox (УВЕЛИЧИЛ толщину рамки с 2 до 4)
                 draw.rectangle([x1, y1, x2, y2], 
-                             outline=pink_color, width=2)
+                             outline=pink_color, width=4)  # Было width=2
                 
                 # Подписываем bbox с confidence (формат: "id1 .87")
                 label = f"{id_val} .{int(confidence * 100):02d}"
@@ -503,8 +570,8 @@ def draw_detections(image_url, detections, method, seed, single_detection_index=
                 
                 # Координаты объекта
                 if obj_lat and obj_lon:
-                    coord_text1 = f"{obj_lat:.6f}"
-                    coord_text2 = f"{obj_lon:.6f}"
+                    coord_text1 = f"{obj_lat:.5f}"
+                    coord_text2 = f"{obj_lon:.5f}"
                     
                     coord_bg_x = x1 + 1
                     coord_bg_y = y1 + label_bg_height + 1
@@ -582,10 +649,18 @@ def detect_objects_endpoint():
             return jsonify({"success": False, "error": "image_url is required"}), 400
         
         # Детектируем объекты
-        detections = detect_objects(image_url, lat, lon, int(method), seed)
+        results = detect_objects(image_url, lat, lon, int(method), seed)
+        detections = results.get("detections", [])
         
-        # Отрисовываем изображение со всеми bbox
-        img_buffer, _ = draw_detections(image_url, detections, method, seed)
+        # Отрисовываем изображение со всеми bbox и масками
+        img_buffer, _ = draw_detections(
+            image_url, 
+            detections, 
+            method, 
+            seed,
+            road_mask=results.get("road_mask"),
+            other_mask=results.get("other_mask")
+        )
         
         # Возвращаем ТОЛЬКО изображение
         return send_file(
@@ -626,13 +701,21 @@ def detect_batch():
             
             try:
                 # Детектируем объекты
-                detections = detect_objects(image_url, lat, lon, method, seed)
+                detection_results = detect_objects(image_url, lat, lon, method, seed)
+                detections = detection_results.get("detections", [])
                 
-                # Отрисовываем основное изображение со всеми bbox
-                img_buffer_all, _ = draw_detections(image_url, detections, method, seed)
+                # Отрисовываем основное изображение со всеми bbox и масками
+                img_buffer_all, _ = draw_detections(
+                    image_url, 
+                    detections, 
+                    method, 
+                    seed,
+                    road_mask=detection_results.get("road_mask"),
+                    other_mask=detection_results.get("other_mask")
+                )
                 main_uuid = save_photo(img_buffer_all, image_url, detections)
                 
-                # Отрисовываем отдельные фото для каждого bbox
+                # Отрисовываем отдельные фото для каждого bbox (без масок)
                 single_photos = []
                 for j, detection in enumerate(detections):
                     single_buffer, _ = draw_detections(image_url, [detection], method, seed, single_detection_index=0)
